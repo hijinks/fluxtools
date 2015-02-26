@@ -69,6 +69,17 @@ class GISbatch:
         self.output_path = config['output']
         self.original_dem = config['original_dem']
         
+        # Workflow variables
+        self.flow_dir = config['flow_dir']
+        self.flow_acc = config['flow_acc']
+        self.str_net = config['str_net']
+        self.set_null = config['set_null']
+        self.str_ord = config['str_ord']
+        
+        # Climate variables
+        self.climates = config['climates']
+
+        
         # Set the environment variables
         arcpy.env.scratchWorkspace = self.scratch_path
         self.batch_path = self.set_workspace()
@@ -79,7 +90,28 @@ class GISbatch:
 
         # Load in Spatial Analyst Toolbox
         arcpy.CheckOutExtension("Spatial")
+    
+    def select_batch_directory(self, root_dir):
+        os.chdir(root_dir)
+        times = {}
+        days = {}
         
+        for dir_name in glob.glob("*"):
+            t_frags = dir_name.split('_')
+            t_int = map(int, t_frags)
+            dt = datetime.datetime(t_int[0], t_int[1], t_int[2], t_int[3], t_int[4], t_int[5])
+            times.update({dir_name: dt})
+            ds = '_'.join([t_frags[0], t_frags[1], t_frags[2]])
+            days.update({ds:{}})
+                    
+        for k in times.keys():
+            t_frags = k.split('_')
+            ds = '_'.join([t_frags[0], t_frags[1], t_frags[2]])
+            t_string = times[k].strftime("%H:%M:%S")
+            days[ds].update({t_string:k})
+        
+        return days
+    
     def get_time_string(self):
         t = datetime.datetime.now()
         tstuff = [t.year, t.month, t.day, t.hour, t.minute, t.second]
@@ -128,9 +160,12 @@ class GISbatch:
         
         print('Steam network')
         stream_net_path = self.stream_network(flow_acc_path)
+
+        print('Nullify')
+        null_path = self.nullify(stream_net_path)
         
         print('Stream order')
-        s_ord_path = self.stream_order(stream_net_path, flow_path)
+        s_ord_path = self.stream_order(null_path, flow_path)
         
         print('Vectorise streams')
         vector_streams = self.vectorise_streams(s_ord_path, flow_path)
@@ -221,8 +256,8 @@ class GISbatch:
         
 
     def flow_direction(self, fill_path):
-        force_flow = "NORMAL"
-
+        force_flow = self.flow_dir['force_flow']
+        
         out_flow_dir = FlowDirection(fill_path, force_flow)
         out_flow_dir_raster = self.project_name + '_f_dir.tif'
         out_flow_dir_path = os.path.join(self.batch_path, out_flow_dir_raster)
@@ -232,8 +267,8 @@ class GISbatch:
         
 
     def flow_accumulation(self, flow_path):
-        flow_weight_raster = ""
-        flow_data_type = "INTEGER"
+        flow_weight_raster = self.flow_acc['flow_weight_raster']
+        flow_data_type = self.flow_acc['flow_data_type']
 
         out_flow_acc = FlowAccumulation(flow_path, flow_weight_raster, flow_data_type)
         out_flow_acc_raster = self.project_name + '_f_acc.tif'
@@ -244,22 +279,31 @@ class GISbatch:
         
 
     def stream_network(self, flow_acc_path):##
-        minimum_value = 300
-        con_where_clause = "VALUE > " + str(minimum_value)
+        con_where_clause = self.str_net['conditional']
+        false_constant = self.str_net['false_constant']
         true_raster = flow_acc_path
-        false_constant = 0
 
         out_con = Con(flow_acc_path, true_raster, false_constant, con_where_clause)
-        out_con_raster = self.project_name + '_net_' + str(minimum_value) + '.tif'
+        out_con_raster = self.project_name + '_net.tif'
         stream_net_path = os.path.join(self.batch_path, out_con_raster)
         out_con.save(stream_net_path)
         
         return stream_net_path
+ 
+    def nullify(self, stream_net_path):
+        false_raster = self.set_null['false_raster']
+        null_where_clause = self.set_null['conditional']
+
+        out_null = SetNull(stream_net_path, false_raster, null_where_clause)
+        out_null_raster = self.project_name + '_net_null.tif'
+        out_null_path = os.path.join(self.batch_path, out_null_raster)
+        out_null.save(out_null_path)
         
+        return out_null_path       
 
     def stream_order(self, null_path, flow_path):
-        method = "STRAHLER"
-
+        method = self.str_ord['method']
+        
         out_s_ord_raster = self.project_name + '_s_order.tif'
         out_s_ord_path = os.path.join(self.batch_path, out_s_ord_raster)
         out_s_ord = StreamOrder(null_path, flow_path, method)
@@ -479,7 +523,6 @@ try:
             f.close()
             gbatch = GISbatch(yaml_config)
             
-            
             if app.skip_to_discharge == 0:
                 if app.skip_to_watersheds == 0:
                     hydro_paths = gbatch.hydro_workflow()
@@ -508,48 +551,67 @@ try:
                         print('File does not exist!')
 
                 watershed_raster = gbatch.watershed_workflow(pour_point_path, hydro_paths)
+                watershed_directory = os.path.dirname(os.path.realpath(watershed_raster))
+                
+            else: # Skip to discharge calculations
+
+                hydro_paths = 0
+                watershed_raster = 0
+                
+                while hydro_paths == 0 or watershed_raster == 0:
+                    p = shell.Prompt("Path to hydro_paths config file: ")
+                    if os.path.exists(p.input):
+                        h_paths = p.input
+                    else:
+                        print('File does not exist!')
+
+                    f = open(h_paths)
+                    hydro_paths = yaml.load(f.read())
+                    f.close()   
+                    
+                    h_dir = os.path.dirname(os.path.realpath(h_paths))
+                    watershed_calcs = os.path.join(h_dir, 'watershed_calcs')
+                    days = gbatch.select_batch_directory(watershed_calcs)
+                    
+                    # Choose watershed batch
+                    d_strings = []
+                    d_frag_list = []
+                    
+                    # Ask which days
+                    for k in days:
+                        d_frags = k.split('_')
+                        d_int = map(int, d_frags)
+                        dt = datetime.datetime(d_int[0], d_int[1], d_int[2])
+                        d_strings.append(dt.strftime("%a %b %d %Y"))
+                        d_frag_list.append(k)
+                    
+                    
+                    p1 = shell.Prompt("Pick batch day", options = d_strings, numbered = True)
+                        
+                    # Ask which times
+                    d_index = d_strings.index(p1.input)
+                    d_choice = days[d_frag_list[d_index]]
+                                        
+                    p2 = shell.Prompt("Pick batch time", options = d_choice.keys(), numbered = True)
+                    
+                    watershed_raster = os.path.join(watershed_calcs, 
+                                                    d_choice[p2.input], 
+                                gbatch.project_name + '_watersheds.tif')
+                    
+                    watershed_directory = os.path.dirname(os.path.realpath(watershed_raster))
+                    
+            # Pick climate scenario
+            climate_by_name = {}
+            climate_names = []
+            for c in gbatch.climates:
+                climate_by_name.update({c['name']: c})
+                climate_names.append(c['name'])
             
-            else:
-                print('test')
-                
-#                hydro_paths = 0
-#                watershed_raster = 0
-#                while hydro_paths == 0 or watershed_raster == 0:
-#                    p = shell.Prompt("Path to hydro_paths config file: ")
-#                    if os.path.exists(p.input):
-#                        hydro_paths = p.input
-#                    else:
-#                        print('File does not exist!')
-#                    
-#                    t = shell.Prompt("Path to watershed raster: ")
-#                    if os.path.exists(t.input):
-#                        watershed_raster = t.input
-#                    else:
-#                        print('File does not exist!')                       
-#                
-                
-#            temperature_directory = 0
-#            precipitation_directory = 0
-#            while temperature_directory == 0 or precipitation_directory == 0:
-#                p = shell.Prompt("Path to precipitation raster directory: ")
-#                if os.path.isdir(p.input):
-#                    precipitation_directory = p.input
-#                else:
-#                    print('Directory does not exist!')
-#                
-#                t = shell.Prompt("Path to temperature raster directory: ")
-#                if os.path.isdir(t.input):
-#                    temperature_directory = t.input
-#                else:
-#                    print('Directory does not exist!')        
-            watershed_directory = r"C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Output\2015_2_17_13_0_35\watershed_calcs\2015_2_17_14_11_55"
-            watershed_raster =  r"C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Output\2015_2_17_13_0_35\watershed_calcs\2015_2_17_14_11_55\death_valley_watersheds.tif"
-            h_paths = r"C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Output\2015_2_17_13_0_35\hydro_paths.yml"
-            temperature_directory =  r"C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Climate\tmean_12_tif"
-            precipitation_directory = r"C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Climate\prec_12_tif"
-            f = open(h_paths)
-            hydro_paths = yaml.load(f.read())
-            f.close()   
+            p = shell.Prompt("Pick climate scenario", options = climate_names, numbered = True)
+
+            climate_scenario = climate_by_name[p.input]
+            temperature_directory = climate_scenario['temp_directory']
+            precipitation_directory = climate_scenario['precip_directory']
             
             gbatch.bqart_workflow(watershed_raster, hydro_paths, watershed_directory, temperature_directory, precipitation_directory)
             
