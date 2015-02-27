@@ -1,0 +1,28 @@
+﻿--- 
+original_dem: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\DEM\dv_utm11_clip.tif
+output: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Output
+project_name: death_valley
+projection_code: 32611
+root: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal
+scratch: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Scratch
+
+flow_acc: 
+  flow_data_type: 'INTEGER'
+  flow_weight_raster: ""
+flow_dir: 
+  force_flow: 'NORMAL'
+str_net: 
+  conditional: "VALUE > 300"
+  false_constant: 0
+set_null: 
+  conditional: "VALUE = 0"
+  false_raster: 1
+str_ord: 
+  method: STRAHLER
+
+  
+climates: 
+  - 
+    name: mean_annual
+    precip_directory: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Climate\prec_12_tif
+    temp_directory: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Climate\tmean_12_tif
