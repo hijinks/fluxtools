@@ -234,7 +234,7 @@ class GISbatch:
         print('Climate zone statistics') 
         tz_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, temp_clip, 'temp_data')
         pz_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, precip_clip, 'precip_data')
-        ez_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, hydro_paths['null_path'], 'elev_data')
+        ez_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, hydro_paths['fill_path'], 'elev_data')
         
         print('Calculating Qs using BQART') 
         qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path)
@@ -463,13 +463,13 @@ class GISbatch:
             min_reliefs.update({row.getValue('VALUE'): row.getValue('MIN')})
             areas.update({row.getValue('VALUE'): row.getValue('AREA')})
             
-        
         # BQART
         w = 0.0006
         B = 1
         
         qs_rows = []
 
+        
         # Units!!
 
         # Qs (kg/s)
@@ -491,10 +491,11 @@ class GISbatch:
             # Converting area from m^2 to km^2
             A = math.pow((areas[k]/1000000), 0.5)
             # Converting elevation from m to km
-            R = max_reliefs[k]/1000 - min_reliefs[k]/1000
+            R = max_reliefs[k] - min_reliefs[k]
+            R_km = R/ float(1000)
             T = temps[k]/10 # Worldclim temps need to be divided by 10
-            Qs = w*B*Q*A*R*T
-            qs = [w, B, Q, A, R, T, Qs]
+            Qs = w*B*Q*A*R_km*T
+            qs = [w, B, Q, A, R_km, T, Qs]
             qs_rows.append(qs)
             
         return qs_rows
@@ -558,47 +559,47 @@ try:
                 hydro_paths = 0
                 watershed_raster = 0
                 
-                while hydro_paths == 0 or watershed_raster == 0:
+                while hydro_paths == 0:
                     p = shell.Prompt("Path to hydro_paths config file: ")
                     if os.path.exists(p.input):
                         h_paths = p.input
+                        hydro_paths = 1
                     else:
                         print('File does not exist!')
-
-                    f = open(h_paths)
-                    hydro_paths = yaml.load(f.read())
-                    f.close()   
+                f = open(h_paths)
+                hydro_paths = yaml.load(f.read())
+                f.close()   
+                
+                h_dir = os.path.dirname(os.path.realpath(h_paths))
+                watershed_calcs = os.path.join(h_dir, 'watershed_calcs')
+                days = gbatch.select_batch_directory(watershed_calcs)
+                
+                # Choose watershed batch
+                d_strings = []
+                d_frag_list = []
+                
+                # Ask which days
+                for k in days:
+                    d_frags = k.split('_')
+                    d_int = map(int, d_frags)
+                    dt = datetime.datetime(d_int[0], d_int[1], d_int[2])
+                    d_strings.append(dt.strftime("%a %b %d %Y"))
+                    d_frag_list.append(k)
+                
+                
+                p1 = shell.Prompt("Pick batch day", options = d_strings, numbered = True)
                     
-                    h_dir = os.path.dirname(os.path.realpath(h_paths))
-                    watershed_calcs = os.path.join(h_dir, 'watershed_calcs')
-                    days = gbatch.select_batch_directory(watershed_calcs)
-                    
-                    # Choose watershed batch
-                    d_strings = []
-                    d_frag_list = []
-                    
-                    # Ask which days
-                    for k in days:
-                        d_frags = k.split('_')
-                        d_int = map(int, d_frags)
-                        dt = datetime.datetime(d_int[0], d_int[1], d_int[2])
-                        d_strings.append(dt.strftime("%a %b %d %Y"))
-                        d_frag_list.append(k)
-                    
-                    
-                    p1 = shell.Prompt("Pick batch day", options = d_strings, numbered = True)
-                        
-                    # Ask which times
-                    d_index = d_strings.index(p1.input)
-                    d_choice = days[d_frag_list[d_index]]
-                                        
-                    p2 = shell.Prompt("Pick batch time", options = d_choice.keys(), numbered = True)
-                    
-                    watershed_raster = os.path.join(watershed_calcs, 
-                                                    d_choice[p2.input], 
-                                gbatch.project_name + '_watersheds.tif')
-                    
-                    watershed_directory = os.path.dirname(os.path.realpath(watershed_raster))
+                # Ask which times
+                d_index = d_strings.index(p1.input)
+                d_choice = days[d_frag_list[d_index]]
+                                    
+                p2 = shell.Prompt("Pick batch time", options = d_choice.keys(), numbered = True)
+                
+                watershed_raster = os.path.join(watershed_calcs, 
+                                                d_choice[p2.input], 
+                            gbatch.project_name + '_watersheds.tif')
+                
+                watershed_directory = os.path.dirname(os.path.realpath(watershed_raster))
                     
             # Pick climate scenario
             climate_by_name = {}
