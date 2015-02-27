@@ -7,6 +7,8 @@ Created on Thu Jan 29 15:14:57 2015
 import cement
 import yaml
 import os
+from os.path import basename
+
 import arcpy
 import datetime
 import shutil
@@ -65,6 +67,7 @@ class GISbatch:
         self.project_root = config['root']
         self.project_name = config['project_name']
         self.projection_code = config['projection_code']
+        self.pour_points_path = config['pour_points_path']
         self.scratch_path = config['scratch']
         self.output_path = config['output']
         self.original_dem = config['original_dem']
@@ -75,6 +78,7 @@ class GISbatch:
         self.str_net = config['str_net']
         self.set_null = config['set_null']
         self.str_ord = config['str_ord']
+        self.pour_points = config['pour_points']
         
         # Climate variables
         self.climates = config['climates']
@@ -186,27 +190,27 @@ class GISbatch:
         return hydro_paths
         
 
-    def watershed_workflow(self, pour_point_path, hydro_paths):
+    def watershed_workflow(self, original_pour_points, hydro_paths):
 
         print('Starting Watershed workflow')
       
         print('Creating batch directory')
-        self.watershed_batch_path = self.setup_watershed_batch(pour_point_path)
+        self.watershed_batch_path, pp_path = self.setup_watershed_batch(original_pour_points)
         
         print('Assigning UIDs')
-        self.assign_uids(pour_point_path)
+        self.assign_uids(pp_path)
         
         print('Snap to pour points')
-        pp_path = self.snap_pour_points(pour_point_path, hydro_paths['flow_acc_path'])
+        snap_pp_path = self.snap_pour_points(pp_path, hydro_paths['flow_acc_path'])
 
         print('Extract watersheds')
-        ws_path = self.watersheds(hydro_paths['flow_path'], pp_path)
+        ws_path = self.watersheds(hydro_paths['flow_path'], snap_pp_path)
         
         print('Converting to polygons')
         self.ws_to_poly(ws_path)
 
         watershed_paths = {
-            'pour_points' : pp_path,
+            'pour_points' : snap_pp_path,
             'watersheds' : ws_path
         }
         
@@ -223,9 +227,9 @@ class GISbatch:
         originals_batch_path = os.path.join(climate_batch_path, 'originals')
         
         print('Averaging precipitation rasters')
-        precip_raster_path = self.average_rasters(precip_directory, originals_batch_path, 'precip_combined.tif')
+        precip_raster_path = self.average_rasters(precip_directory, originals_batch_path, 'precip_combined.tif', false)
         print('Averaging temperature rasters')        
-        temp_raster_path = self.average_rasters(temp_directory, originals_batch_path, 'temp_combined.tif')
+        temp_raster_path = self.average_rasters(temp_directory, originals_batch_path, 'temp_combined.tif', true)
         
         print('Clipping climate rasters') 
         temp_clip = self.clip_raster(temp_raster_path, originals_batch_path, 'temp_clip.tif', watershed_raster)
@@ -338,39 +342,46 @@ class GISbatch:
         # Copy original Pour Points
         shutil.copy2(original_pour_points, originals_batch_path)
         
-        return watershed_batch_path
+        working_pp_path = os.path.join(watershed_batch_path, basename(original_pour_points))
+        arcpy.CopyFeatures_management(original_pour_points, working_pp_path)
+        
+        return watershed_batch_path, working_pp_path
             
             
     def assign_uids(self, pp_path):
-        arcpy.AddField_management(pp_path, "UID", "SHORT")
-        rows = arcpy.da.UpdateCursor(pp_path, ['UID'])
+        arcpy.AddField_management(pp_path, 'c_id', "SHORT")
+        rows = arcpy.da.UpdateCursor(pp_path, ['c_id'])
         i = 1
         for row in rows:
             row[0] = i
             i = i+1
             rows.updateRow(row)
-            
+       
+       # Unlock data
+        del row 
+        del rows
+        
     def pour_points_to_raster(self, pour_points):
         pp_raster_name = self.project_name +'_pp_raster.tif'
         pp_raster_path = os.path.join(self.watershed_batch_path, pp_raster_name)
-        arcpy.PointToRaster_conversion(pour_points, "UID", pp_raster_path, 'MOST_FREQUENT', '', '10')        
+        arcpy.PointToRaster_conversion(pour_points, "c_id", pp_raster_path, 'MOST_FREQUENT', '', '10')        
         
         return pp_raster_path
         
         
     def snap_pour_points(self, pour_points, flow_acc):
-        snap_distance = 30
+        snap_distance = self.pour_points['snap_distance']
         
         out_pp_name = self.project_name + '_ppoints.tif'
         out_pp_path = os.path.join(self.watershed_batch_path, out_pp_name)        
-        pp = SnapPourPoint(pour_points, flow_acc, snap_distance, "UID")
+        pp = SnapPourPoint(pour_points, flow_acc, snap_distance, "c_id")
         pp.save(out_pp_path)
         
         return out_pp_path
     
             
     def watersheds(self, flow_path, pp_path):
-        inPourPointField = "VALUE" # Now contains the UID values
+        inPourPointField = "c_id" # Now contains the UID values
         
         out_ws_name = self.project_name + '_watersheds.tif'
         out_ws_path = os.path.join(self.watershed_batch_path, out_ws_name)
@@ -384,7 +395,7 @@ class GISbatch:
         
         out_poly_name = self.project_name + '_poly_ws'
         out_poly_path = os.path.join(self.watershed_batch_path, out_poly_name)
-        arcpy.RasterToPolygon_conversion(ws_path, out_poly_path, "NO_SIMPLIFY", 'VALUE')      
+        arcpy.RasterToPolygon_conversion(ws_path, out_poly_path, "NO_SIMPLIFY", 'c_id')      
         
         return out_poly_path
         
@@ -404,18 +415,19 @@ class GISbatch:
         return climate_batch_path
 
 
-    def average_rasters(self, search_directory, save_directory, name):
+    def average_rasters(self, search_directory, save_directory, name, monthly):
         os.chdir(search_directory)
         rasters = []
         for file in glob.glob("*.tif"):
             rasters.append(Raster(os.path.join(search_directory,file)))
          
         raster_sum = sum(rasters)
-        # We don't need to divide by number of months - otherwise it'd be
-        # Monthly average!!
-#        n_rasters = len(rasters)
-#        combined_raster = raster_sum / n_rasters
-        combined_raster = raster_sum
+        
+        if monthly:
+            n_rasters = len(rasters)
+            combined_raster = raster_sum / n_rasters
+        else:
+            combined_raster = raster_sum
 
         combined_raster_path = os.path.join(save_directory, name)
         combined_raster.save(combined_raster_path)
@@ -495,14 +507,14 @@ class GISbatch:
             R_km = R/ float(1000)
             T = temps[k]/10 # Worldclim temps need to be divided by 10
             Qs = w*B*Q*A*R_km*T
-            qs = [w, B, Q, A, R_km, T, Qs]
+            qs = [k, w, B, Q, A, R_km, T, Qs]
             qs_rows.append(qs)
             
         return qs_rows
     
     def save_data_to_csv(self, qs_data, path):
         data_name = 'qs_data.csv'
-        row_headers = ['w', 'B', 'Q (kg/s)', 'A (km^2)', 'R (km)', 'T(C)', 'Qs (kg/t)']
+        row_headers = ['id', 'w', 'B', 'Q (kg/s)', 'A (km^2)', 'R (km)', 'T(C)', 'Qs (kg/t)']
         data_path = os.path.join(path, data_name)
         with open(data_path, 'wb') as qs_file:
             a = csv.writer(qs_file, delimiter=',')
@@ -537,19 +549,31 @@ try:
                             f.close()
                         else:
                             print('Cannot find '+ hydro_file_path)
-                            exit
+                            hydro_paths_exists = 0
+                            while hydro_paths_exists == 0:
+                                p = shell.Prompt("Path to hydro_paths config file: ")
+                                if os.path.exists(p.input):
+                                    f = open(p.input)
+                                    hydro_paths = yaml.load(f.read())
+                                    f.close() 
+                                    hydro_paths_exists = 1
+                                else:
+                                    print('File does not exist!')
                         
                     except (OSError, IOError) as e:
                         print(e)
                         exit
-                        
-                pour_point_path = 0
-                while pour_point_path == 0:
-                    p = shell.Prompt("Path to pour point shapefile: ")
-                    if os.path.exists(p.input):
-                        pour_point_path = p.input
-                    else:
-                        print('File does not exist!')
+
+                if os.path.exists(gbatch.pour_points_path):
+                    pour_point_path = gbatch.pour_points_path
+                else:
+                    pour_point_path = 0
+                    while pour_point_path == 0:
+                        p = shell.Prompt("Path to pour point shapefile: ")
+                        if os.path.exists(p.input):
+                            pour_point_path = p.input
+                        else:
+                            print('File does not exist!')
 
                 watershed_raster = gbatch.watershed_workflow(pour_point_path, hydro_paths)
                 watershed_directory = os.path.dirname(os.path.realpath(watershed_raster))
@@ -614,7 +638,9 @@ try:
             temperature_directory = climate_scenario['temp_directory']
             precipitation_directory = climate_scenario['precip_directory']
             
-            gbatch.bqart_workflow(watershed_raster, hydro_paths, watershed_directory, temperature_directory, precipitation_directory)
+            gbatch.bqart_workflow(watershed_raster, hydro_paths, 
+                                  watershed_directory, temperature_directory, 
+                                  precipitation_directory)
             
         except (OSError, IOError) as e:
             print(e)
