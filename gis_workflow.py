@@ -196,8 +196,8 @@ class GISbatch:
       
         print('Creating batch directory')
         self.watershed_batch_path, pp_path = self.setup_watershed_batch(original_pour_points)
-        
-        print('Assigning UIDs')
+
+        print('Assigning UIDs') # For processing
         self.assign_uids(pp_path)
         
         print('Snap to pour points')
@@ -205,10 +205,14 @@ class GISbatch:
 
         print('Extract watersheds')
         ws_path = self.watersheds(hydro_paths['flow_path'], snap_pp_path)
-        
-        print('Converting to polygons')
-        self.ws_to_poly(ws_path)
 
+        print('Assigning CIDs') # Catchment Ids
+        self.assign_cids(ws_path)
+        
+        # print('Converting to polygons')
+        # self.ws_to_poly(ws_path)
+
+        
         watershed_paths = {
             'pour_points' : snap_pp_path,
             'watersheds' : ws_path
@@ -227,9 +231,9 @@ class GISbatch:
         originals_batch_path = os.path.join(climate_batch_path, 'originals')
         
         print('Averaging precipitation rasters')
-        precip_raster_path = self.average_rasters(precip_directory, originals_batch_path, 'precip_combined.tif', false)
+        precip_raster_path = self.average_rasters(precip_directory, originals_batch_path, 'precip_combined.tif', 0)
         print('Averaging temperature rasters')        
-        temp_raster_path = self.average_rasters(temp_directory, originals_batch_path, 'temp_combined.tif', true)
+        temp_raster_path = self.average_rasters(temp_directory, originals_batch_path, 'temp_combined.tif', 1)
         
         print('Clipping climate rasters') 
         temp_clip = self.clip_raster(temp_raster_path, originals_batch_path, 'temp_clip.tif', watershed_raster)
@@ -282,7 +286,7 @@ class GISbatch:
         return out_flow_acc_path
         
 
-    def stream_network(self, flow_acc_path):##
+    def stream_network(self, flow_acc_path):
         con_where_clause = self.str_net['conditional']
         false_constant = self.str_net['false_constant']
         true_raster = flow_acc_path
@@ -349,11 +353,24 @@ class GISbatch:
             
             
     def assign_uids(self, pp_path):
-        arcpy.AddField_management(pp_path, 'c_id', "SHORT")
-        rows = arcpy.da.UpdateCursor(pp_path, ['c_id'])
+        arcpy.AddField_management(pp_path, 'UID', "SHORT")
+        rows = arcpy.da.UpdateCursor(pp_path, ['UID'])
         i = 1
         for row in rows:
             row[0] = i
+            i = i+1
+            rows.updateRow(row)
+       
+       # Unlock data
+        del row 
+        del rows
+ 
+    def assign_cids(self, pp_path):
+        arcpy.AddField_management(pp_path, 'c_id', "TEXT")
+        rows = arcpy.da.UpdateCursor(pp_path, ['c_id'])
+        i = 1
+        for row in rows:
+            row[0] = 'c_'+str(i)
             i = i+1
             rows.updateRow(row)
        
@@ -364,7 +381,7 @@ class GISbatch:
     def pour_points_to_raster(self, pour_points):
         pp_raster_name = self.project_name +'_pp_raster.tif'
         pp_raster_path = os.path.join(self.watershed_batch_path, pp_raster_name)
-        arcpy.PointToRaster_conversion(pour_points, "c_id", pp_raster_path, 'MOST_FREQUENT', '', '10')        
+        arcpy.PointToRaster_conversion(pour_points, "UID", pp_raster_path, 'MOST_FREQUENT', '', '10')        
         
         return pp_raster_path
         
@@ -372,16 +389,16 @@ class GISbatch:
     def snap_pour_points(self, pour_points, flow_acc):
         snap_distance = self.pour_points['snap_distance']
         
-        out_pp_name = self.project_name + '_ppoints.tif'
+        out_pp_name = self.project_name + '_snap_ppoints.tif'
         out_pp_path = os.path.join(self.watershed_batch_path, out_pp_name)        
-        pp = SnapPourPoint(pour_points, flow_acc, snap_distance, "c_id")
+        pp = SnapPourPoint(pour_points, flow_acc, snap_distance, "UID")
         pp.save(out_pp_path)
         
         return out_pp_path
     
             
     def watersheds(self, flow_path, pp_path):
-        inPourPointField = "c_id" # Now contains the UID values
+        inPourPointField = "VALUE" # Now contains the c_id values
         
         out_ws_name = self.project_name + '_watersheds.tif'
         out_ws_path = os.path.join(self.watershed_batch_path, out_ws_name)
@@ -395,7 +412,7 @@ class GISbatch:
         
         out_poly_name = self.project_name + '_poly_ws'
         out_poly_path = os.path.join(self.watershed_batch_path, out_poly_name)
-        arcpy.RasterToPolygon_conversion(ws_path, out_poly_path, "NO_SIMPLIFY", 'c_id')      
+        arcpy.RasterToPolygon_conversion(ws_path, out_poly_path, "NO_SIMPLIFY", 'VALUE')      
         
         return out_poly_path
         
@@ -423,10 +440,10 @@ class GISbatch:
          
         raster_sum = sum(rasters)
         
-        if monthly:
+        if monthly: # Temp
             n_rasters = len(rasters)
             combined_raster = raster_sum / n_rasters
-        else:
+        else: # precip
             combined_raster = raster_sum
 
         combined_raster_path = os.path.join(save_directory, name)
@@ -444,7 +461,7 @@ class GISbatch:
 
     def zone_statistics(self, table_directory, watersheds, value_raster, data_name):
         table_path = os.path.join(table_directory, data_name)
-        outdata = ZonalStatisticsAsTable(watersheds, "VALUE", value_raster, table_path, "DATA")
+        outdata = ZonalStatisticsAsTable(watersheds, "c_id", value_raster, table_path, "DATA")
         
         return outdata      
     
@@ -463,17 +480,17 @@ class GISbatch:
         
         for row in t_cursor:
             # Get mean temperature
-            temps.update({row.getValue('VALUE'): row.getValue('MEAN')})
+            temps.update({row.getValue('c_id'): row.getValue('MEAN')})
         
         for row in p_cursor:
             # Get mean precipitation
-            precips.update({row.getValue('VALUE'): row.getValue('MEAN')})
+            precips.update({row.getValue('c_id'): row.getValue('MEAN')})
             
         for row in e_cursor:
             # Get highest, lowest elevation & area of waters====heds
-            max_reliefs.update({row.getValue('VALUE'): row.getValue('MAX')})
-            min_reliefs.update({row.getValue('VALUE'): row.getValue('MIN')})
-            areas.update({row.getValue('VALUE'): row.getValue('AREA')})
+            max_reliefs.update({row.getValue('c_id'): row.getValue('MAX')})
+            min_reliefs.update({row.getValue('c_id'): row.getValue('MIN')})
+            areas.update({row.getValue('c_id'): row.getValue('AREA')})
             
         # BQART
         w = 0.0006
@@ -499,9 +516,9 @@ class GISbatch:
         for k in precips.keys():
 
             # Multiply area (m^2) with mean annual precip (m) 
-            Q = math.pow(areas[k]*(precips[k]/1000), 0.31)
+            Q = math.pow(areas[k]*(precips[k]/float(1000)), 0.31)
             # Converting area from m^2 to km^2
-            A = math.pow((areas[k]/1000000), 0.5)
+            A = math.pow(areas[k]/float(1000000), 0.5)
             # Converting elevation from m to km
             R = max_reliefs[k] - min_reliefs[k]
             R_km = R/ float(1000)
@@ -514,7 +531,7 @@ class GISbatch:
     
     def save_data_to_csv(self, qs_data, path):
         data_name = 'qs_data.csv'
-        row_headers = ['id', 'w', 'B', 'Q (kg/s)', 'A (km^2)', 'R (km)', 'T(C)', 'Qs (kg/t)']
+        row_headers = ['id', 'w', 'B', 'Q (kg/s)', 'A (km^2)', 'R (km)', 'T(C)', 'Qs (MT/y)']
         data_path = os.path.join(path, data_name)
         with open(data_path, 'wb') as qs_file:
             a = csv.writer(qs_file, delimiter=',')

@@ -3,6 +3,7 @@ original_dem: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\DEM\d
 output: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Output
 project_name: death_valley
 projection_code: 32611
+pour_points: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Pour_Points.shp
 root: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal
 scratch: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Scratch
 
