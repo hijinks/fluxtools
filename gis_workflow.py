@@ -133,12 +133,11 @@ class GISbatch:
         
             # Assuming it doesn't exist already
             output_batch_path = os.path.join(self.output_path, dirname)
-            originals_batch_path = os.path.join(output_batch_path, 'originals')
+  
             os.makedirs(output_batch_path)
-            os.makedirs(originals_batch_path)
             
             # Copy original DEM
-            shutil.copy2(self.original_dem, originals_batch_path)
+            shutil.copy2(self.original_dem, output_batch_path)
             
         else:
             if os.path.isdir(app.pargs.batch):
