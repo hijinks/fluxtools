@@ -68,6 +68,8 @@ class GISbatch:
         self.project_name = config['project_name']
         self.projection_code = config['projection_code']
         self.pour_points_path = config['pour_points_path']
+        self.fault_path = config['fault_path']
+        self.fault_data = ''
         self.scratch_path = config['scratch']
         self.output_path = config['output']
         self.original_dem = config['original_dem']
@@ -78,7 +80,9 @@ class GISbatch:
         self.str_net = config['str_net']
         self.set_null = config['set_null']
         self.str_ord = config['str_ord']
+        self.faults = config['faults']
         self.pour_points = config['pour_points']
+        
         
         # Climate variables
         self.climates = config['climates']
@@ -181,32 +185,64 @@ class GISbatch:
             'stream_net_path' : stream_net_path,
             'null_path' : null_path,
             's_ord_path' : s_ord_path,
-            'vector_streams' : vector_streams
+            'vector_streams' : vector_streams,
+            'fault_data': ''
        }
         with open(os.path.join(self.batch_path,'hydro_paths.yml'), 'w') as outfile:
             outfile.write(yaml.dump(hydro_paths, default_flow_style=True) )
         
         return hydro_paths
         
-
+    def fault_workflow(self, faultlines, hydro_paths):
+        
+        print('Starting Fault workflow')
+        
+        print('Find intersects of faults and streams')
+        # Fault intersects
+        intersects_multipart = self.fault_intersects(faultlines, hydro_paths['vector_streams'], self.faults['cluster_tolerance'])
+        
+        print('Changing intersects to singlepart dataset')
+        # Multipart to singlepart
+        intersects_singlepart = self.intersects_to_singlepart(intersects_multipart)
+        
+        print('Removing pour point intersects below '+ str(self.pour_points['minimum_height']))
+        # Extract pour points above minimum height 
+        pour_points = self.ignore_lowest_pp(intersects_singlepart, hydro_paths['fill_path'], self.pour_points['minimum_height'])
+        
+        print('Create fault routes')
+        # Create fault routes
+        fault_routes = self.fault_routes(faultlines)
+        
+        print('Measure pour points along faults')
+        # Generate intersect events
+        intersect_events = self.intersect_events(pour_points, fault_routes, self.faults['search_radius'])
+        
+        print('Saving fault data')
+        self.fault_data = self.extract_intersect_positions(intersect_events)
+        
+        
+        # Updating yaml paths
+        
+        hydro_paths['fault_data'] = self.fault_data
+        
+        with open(os.path.join(self.batch_path,'hydro_paths.yml'), 'w') as outfile:
+            outfile.write(yaml.dump(hydro_paths, default_flow_style=True) )
+        
+        return pour_points
+    
+    
     def watershed_workflow(self, original_pour_points, hydro_paths):
 
         print('Starting Watershed workflow')
       
         print('Creating batch directory')
         self.watershed_batch_path, pp_path = self.setup_watershed_batch(original_pour_points)
-
-        print('Assigning UIDs') # For processing
-        self.assign_uids(pp_path)
         
         print('Snap to pour points')
         snap_pp_path = self.snap_pour_points(pp_path, hydro_paths['flow_acc_path'])
 
         print('Extract watersheds')
         ws_path = self.watersheds(hydro_paths['flow_path'], snap_pp_path)
-
-        print('Assigning CIDs') # Catchment Ids
-        self.assign_cids(ws_path)
         
         # print('Converting to polygons')
         # self.ws_to_poly(ws_path)
@@ -224,6 +260,8 @@ class GISbatch:
 
 
     def bqart_workflow(self, watershed_raster, hydro_paths, watershed_path, temp_directory, precip_directory):
+        
+        print('Starting BQART workflow')
         
         print('Creating climate batch directory')
         climate_batch_path = self.climate_batch_directory(watershed_path)
@@ -244,7 +282,7 @@ class GISbatch:
         ez_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, hydro_paths['fill_path'], 'elev_data')
         
         print('Calculating Qs using BQART') 
-        qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path)
+        qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path, hydro_paths['fault_data'])
         
         self.save_data_to_csv(qs_data, climate_batch_path)
         
@@ -296,6 +334,7 @@ class GISbatch:
         out_con.save(stream_net_path)
         
         return stream_net_path
+        
  
     def nullify(self, stream_net_path):
         false_raster = self.set_null['false_raster']
@@ -307,6 +346,7 @@ class GISbatch:
         out_null.save(out_null_path)
         
         return out_null_path       
+        
 
     def stream_order(self, null_path, flow_path):
         method = self.str_ord['method']
@@ -320,12 +360,78 @@ class GISbatch:
         
 
     def vectorise_streams(self, s_ord_path, flow_path):
-        out_sf_name = self.project_name + '_streams'
+        out_sf_name = self.project_name + '_streams.shp'
         out_sf_path = os.path.join(self.batch_path, out_sf_name)
         StreamToFeature(s_ord_path, flow_path, out_sf_path)
         
         return out_sf_path
         
+        
+    # Fault stuff
+        
+    def fault_intersects(self, faultlines, streams, cluster_tolerance):
+        inFeatures = [faultlines, streams]
+        intersects_name = self.project_name + '_intersects_multipart.shp'
+        intersects_multipart = os.path.join(self.batch_path, intersects_name)
+        arcpy.Intersect_analysis(inFeatures, intersects_multipart, "", cluster_tolerance, "point")
+        
+        return intersects_multipart
+        
+        
+    def intersects_to_singlepart(self, intersects_multipart):
+        intersects_name = self.project_name + '_intersects_singlepart.shp'
+        intersects_singlepart = os.path.join(self.batch_path, intersects_name)
+        arcpy.MultipartToSinglepart_management(intersects_multipart, intersects_singlepart)
+        
+        return intersects_singlepart
+        
+        
+    def ignore_lowest_pp(self, intersects_singlepart, height_fill_raster, minimum_height):
+        intersect_heights = os.path.join(self.batch_path, self.project_name + '_intersects_all.shp')
+        ExtractValuesToPoints(intersects_singlepart, height_fill_raster, intersect_heights,
+                      "INTERPOLATE", "ALL") 
+              
+        intersect_heights_above = os.path.join(self.batch_path,  self.project_name + '_intersects_above.shp')
+        arcpy.Select_analysis(intersect_heights, intersect_heights_above, '"RASTERVALU" > '+str(minimum_height))
+        
+        return intersect_heights_above
+        
+
+    def fault_routes(self, faultlines):
+        fault_routes = os.path.join(self.batch_path, self.project_name + "_fault_routes.shp")
+        arcpy.CreateRoutes_lr(faultlines, 'Id', fault_routes, "LENGTH")
+        
+        return fault_routes
+        
+        
+    def intersect_events(self, pour_points, fault_routes, search_radius):
+        intersect_events = os.path.join(self.batch_path, self.project_name + "_intersect_events.dbf")
+        arcpy.LocateFeaturesAlongRoutes_lr(pour_points, fault_routes, "Id", search_radius, intersect_events, "RID POINT MEAS")
+        
+        return intersect_events
+        
+        
+    def extract_intersect_positions(self, intersect_events):
+        ic_cursor = arcpy.SearchCursor(intersect_events)
+        ic_data = []
+        for row in ic_cursor:
+            # Get mean temperature
+            ic_data.append([row.getValue('OID'), row.getValue('RID'), row.getValue('MEAS')])
+        
+        intersect_data = os.path.join(self.batch_path, self.project_name + "_intersect_data.csv")
+        row_headers = ['id', 'fault', 'distance']
+        with open(intersect_data, 'wb') as qs_file:
+            a = csv.writer(qs_file, delimiter=',')
+            a.writerow(row_headers)
+            for r in ic_data:
+                a.writerow([r[0], r[1], r[2]])
+                
+        # Unlock data
+        del row 
+        del ic_cursor
+        
+        return intersect_data
+    
     
     
     # Watershed stuff
@@ -350,37 +456,11 @@ class GISbatch:
         
         return watershed_batch_path, working_pp_path
             
-            
-    def assign_uids(self, pp_path):
-        arcpy.AddField_management(pp_path, 'UID', "SHORT")
-        rows = arcpy.da.UpdateCursor(pp_path, ['UID'])
-        i = 1
-        for row in rows:
-            row[0] = i
-            i = i+1
-            rows.updateRow(row)
-       
-       # Unlock data
-        del row 
-        del rows
- 
-    def assign_cids(self, pp_path):
-        arcpy.AddField_management(pp_path, 'c_id', "TEXT")
-        rows = arcpy.da.UpdateCursor(pp_path, ['c_id'])
-        i = 1
-        for row in rows:
-            row[0] = 'c_'+str(i)
-            i = i+1
-            rows.updateRow(row)
-       
-       # Unlock data
-        del row 
-        del rows
         
     def pour_points_to_raster(self, pour_points):
         pp_raster_name = self.project_name +'_pp_raster.tif'
         pp_raster_path = os.path.join(self.watershed_batch_path, pp_raster_name)
-        arcpy.PointToRaster_conversion(pour_points, "UID", pp_raster_path, 'MOST_FREQUENT', '', '10')        
+        arcpy.PointToRaster_conversion(pour_points, "FID", pp_raster_path, 'MOST_FREQUENT', '', '10')        
         
         return pp_raster_path
         
@@ -390,14 +470,14 @@ class GISbatch:
         
         out_pp_name = self.project_name + '_snap_ppoints.tif'
         out_pp_path = os.path.join(self.watershed_batch_path, out_pp_name)        
-        pp = SnapPourPoint(pour_points, flow_acc, snap_distance, "UID")
+        pp = SnapPourPoint(pour_points, flow_acc, snap_distance, "FID")
         pp.save(out_pp_path)
         
         return out_pp_path
     
             
     def watersheds(self, flow_path, pp_path):
-        inPourPointField = "VALUE" # Now contains the c_id values
+        inPourPointField = "VALUE"
         
         out_ws_name = self.project_name + '_watersheds.tif'
         out_ws_path = os.path.join(self.watershed_batch_path, out_ws_name)
@@ -460,12 +540,12 @@ class GISbatch:
 
     def zone_statistics(self, table_directory, watersheds, value_raster, data_name):
         table_path = os.path.join(table_directory, data_name)
-        outdata = ZonalStatisticsAsTable(watersheds, "c_id", value_raster, table_path, "DATA")
+        outdata = ZonalStatisticsAsTable(watersheds, "VALUE", value_raster, table_path, "DATA")
         
         return outdata      
     
         
-    def do_bqart(self, pz_data, tz_data, ez_data):
+    def do_bqart(self, pz_data, tz_data, ez_data, fault_data_path):
         
         t_cursor = arcpy.SearchCursor(tz_data)
         p_cursor = arcpy.SearchCursor(pz_data)
@@ -479,18 +559,37 @@ class GISbatch:
         
         for row in t_cursor:
             # Get mean temperature
-            temps.update({row.getValue('c_id'): row.getValue('MEAN')})
+            temps.update({row.getValue('VALUE'): row.getValue('MEAN')})
         
         for row in p_cursor:
             # Get mean precipitation
-            precips.update({row.getValue('c_id'): row.getValue('MEAN')})
+            precips.update({row.getValue('VALUE'): row.getValue('MEAN')})
             
         for row in e_cursor:
             # Get highest, lowest elevation & area of waters====heds
-            max_reliefs.update({row.getValue('c_id'): row.getValue('MAX')})
-            min_reliefs.update({row.getValue('c_id'): row.getValue('MIN')})
-            areas.update({row.getValue('c_id'): row.getValue('AREA')})
-            
+            max_reliefs.update({row.getValue('VALUE'): row.getValue('MAX')})
+            min_reliefs.update({row.getValue('VALUE'): row.getValue('MIN')})
+            areas.update({row.getValue('VALUE'): row.getValue('AREA')})
+        
+        fault_data = {}
+        
+        print('Adding fault data from')
+        print(fault_data_path)
+        if fault_data_path:
+            if os.path.exists(fault_data_path):
+                fault_data_output = {}
+                with open(fault_data_path, 'rb') as csvfile:
+                    fault_data = csv.reader(csvfile, delimiter=',')
+                    for row in fault_data:
+                        fault_data_output.update({row[0]: [row[1], row[2]]})
+        # Unlock data
+
+        
+        del row
+        del t_cursor
+        del p_cursor
+        del e_cursor
+        
         # BQART
         w = 0.0006
         B = 1
@@ -523,14 +622,35 @@ class GISbatch:
             R_km = R/ float(1000)
             T = temps[k]/10 # Worldclim temps need to be divided by 10
             Qs = w*B*Q*A*R_km*T
-            qs = [k, w, B, Q, A, R_km, T, Qs]
+            Qs_T = Qs * float(1000000)
+            density = 2700 # kg/m^3
+            volume = Qs_T / float(density) # m^3
+            Area_cubic_m = A * float(1000000)
+            Qs_m_yr = volume / float(Area_cubic_m)  # m
+            Qs_mm_yr = Qs_m_yr * float(1000) # mm
+            
+            qs = [k, precips[k], w, B, Q, A, R_km, T, Qs, Qs_T, density, volume, Qs_m_yr, Qs_mm_yr]
+            if fault_data_output:
+                if fault_data_output[str(k)]:
+                    # Fault number
+                    qs.append(fault_data_output[str(k)][0])
+                    # Distance
+                    qs.append(fault_data_output[str(k)][1])
+
             qs_rows.append(qs)
             
         return qs_rows
     
     def save_data_to_csv(self, qs_data, path):
         data_name = 'qs_data.csv'
-        row_headers = ['id', 'w', 'B', 'Q (kg/s)', 'A (km^2)', 'R (km)', 'T(C)', 'Qs (MT/y)']
+        row_headers = ['id', 'precipitation (mm/yr)', 'w', 'B', 'Q (kg/s)', 'A (km^2)', 
+                       'R (km)', 'T(C)', 'Qs (MT/y)', 'Qs (T/y)', 'density (kg/m^3)', 'volume (m^3/yr)', 
+                       'erosion (m/yr)', 'erosion (mm/yr)']
+                       
+        if len(qs_data[0]) > 14:
+            row_headers.append('fault_id')
+            row_headers.append('distance')
+        
         data_path = os.path.join(path, data_name)
         with open(data_path, 'wb') as qs_file:
             a = csv.writer(qs_file, delimiter=',')
@@ -584,12 +704,21 @@ try:
                     pour_point_path = gbatch.pour_points_path
                 else:
                     pour_point_path = 0
-                    while pour_point_path == 0:
-                        p = shell.Prompt("Path to pour point shapefile: ")
-                        if os.path.exists(p.input):
-                            pour_point_path = p.input
-                        else:
-                            print('File does not exist!')
+                    process_faults = 0
+                    
+                    if gbatch.fault_path:
+                        if os.path.exists(gbatch.fault_path):
+                            process_faults = 1
+                        
+                    if process_faults:
+                        pour_point_path = gbatch.fault_workflow(gbatch.fault_path, hydro_paths)
+                    else:
+                        while pour_point_path == 0:
+                            p = shell.Prompt("Path to pour point shapefile: ")
+                            if os.path.exists(p.input):
+                                pour_point_path = p.input
+                            else:
+                                print('File does not exist!')
 
                 watershed_raster = gbatch.watershed_workflow(pour_point_path, hydro_paths)
                 watershed_directory = os.path.dirname(os.path.realpath(watershed_raster))
