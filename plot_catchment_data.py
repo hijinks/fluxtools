@@ -46,7 +46,16 @@ class Plotter():
         self.faults = {}
         self.distances = {}
         self.selected_fault = ''
-
+        self.datalabel_x = '' 
+        self.datalabel_y = ''
+        self.dataunit_x = ''
+        self.dataunit_y = ''
+        self.plot_options = {
+            'logarithmic': 0,
+            'trend': 1,
+            'line': 'None'
+        }
+        
         self.datanames = [
             'area',
             'precipitation',
@@ -55,6 +64,26 @@ class Plotter():
             'sediment flux',
             'erosion m',
             'erosion mm'
+        ]
+        
+        self.datalabels = [
+            'Catchment areas',
+            'Average precipitation',
+            'Relief',
+            'Sediment volume',
+            'Sediment flux',
+            'Catchment erosion',
+            'Catchment erosion'
+        ]
+        
+        self.dataunits = [
+            'km$^2$',
+            'mm/yr',
+            'km',
+            'm$^3$/kg',
+            'T/yr',
+            'm',
+            'mm'
         ]
         
         with open(datafile, 'rb') as csvfile:
@@ -90,11 +119,15 @@ class Plotter():
         y_axis_prompt = shell.Prompt("Choose Y axis", options = self.datanames, numbered = True)
         y_choice = y_axis_prompt.input
         print(y_choice+' chosen for y-axis')
+        
         extent_choices = [
             'All catchments',
             'Fault specific',
             'Specific catchments'
         ]
+        
+
+        
         p1 = shell.Prompt("Data extent", options = extent_choices, numbered = True)
         
         if p1.input is 'Fault specific':
@@ -103,10 +136,10 @@ class Plotter():
             
             self.selected_fault = int(p2.input.replace('fault ', ''))
             
-            f_x_data = self.get_fault_data(x_choice)
-            f_y_data = self.get_fault_data(y_choice)
+            f_x_data, x_label_id, x_unit_id = self.get_fault_data(x_choice)
+            f_y_data, y_label_id, y_unit_id = self.get_fault_data(y_choice)
             
-            self.plot_data(f_x_data, f_y_data, '')
+            self.plot_data([f_x_data,x_label_id, x_unit_id], [f_y_data, y_label_id, y_unit_id])
             
         elif p1.input is 'Specific catchments':
             # This is when we plot everything
@@ -115,30 +148,47 @@ class Plotter():
 
     def select_dataset(self, dataname):
         print('Choosing dataset for '+ dataname)
+            
         if dataname is self.datanames[1]:
             dataset = self.precipitation
+            unit = 1
+            label = 1
         elif dataname is self.datanames[0]:
             dataset = self.areas
+            unit = 0
+            label = 0
         elif dataname is self.datanames[2]:
             dataset = self.relief
+            unit = 2
+            label = 2
         elif dataname is self.datanames[3]:
             dataset = self.volume_m3_yr
+            unit = 3
+            label = 3
         elif dataname is self.datanames[4]:
             dataset = self.QS_t_yr
+            self.plot_options['logarithmic'] = 1
+            unit = 4
+            label = 4
         elif dataname is self.datanames[6]:
             dataset = self.erosion_mm_yr
+            label = 5
+            unit = 5
         elif dataname is self.datanames[5]:
             dataset = self.erosion_m_yr
+            unit = 6
+            label = 6
         else:
             dataset = ''
             print(dataname+' - not recognised!')
+            exit
             
-        return dataset
+        return dataset, unit, label
         
 
     def get_fault_data(self, dataname):
         
-        dataset = self.select_dataset(dataname)
+        dataset, label, unit = self.select_dataset(dataname)
         
         catchments = self.faults[self.selected_fault]
         
@@ -147,11 +197,49 @@ class Plotter():
         for c in catchments:
             output_data.append(dataset[c])
 
-        return output_data
+        return output_data, label, unit
     
     
-    def plot_data(self, x, y, options):
-        plt.plot(x, y, marker='o', linestyle='None')
+    def plot_data(self, x, y):
+        x_data = x[0]
+        x_label = self.datalabels[x[1]]
+        x_unit = self.dataunits[x[2]]
+        
+        y_data = y[0]
+        y_label = self.datalabels[y[1]]
+        y_unit = self.dataunits[y[2]]
+        
+        plt.plot(x_data, y_data, marker='o', linestyle=self.plot_options['line'])
+        plt.xlabel(x_label+' ('+x_unit+')')
+        plt.ylabel(y_label+' ('+y_unit+')')
+        
+        if self.plot_options['logarithmic']:
+            plt.yscale('log')
+            plt.xscale('log')
+        
+
+        if self.plot_options['trend']:
+            
+            if self.plot_options['logarithmic']:
+                logx = np.log(x_data)
+                logy = np.log(y_data)
+                max_x = np.amax(logx)
+                min_x = np.amin(logx)
+                x_d = np.logspace(min_x, max_x)
+                coeffs = np.polyfit(logx,logy,deg=1, full=True)
+                print('Slope: '+str(coeffs[0][0]))
+                print('Intercepts: '+str(coeffs[0][1]))
+                poly = np.poly1d(coeffs[0])
+                yfit = lambda x: np.exp(poly(np.log(x)))
+                plt.loglog(x_d,yfit(x_d))
+            else:
+                
+                m, b = np.polyfit(x_data, y_data, 1)
+                x_min = np.amin(x_data)
+                x_max = np.amax(x_data)
+                x_d = np.linspace(np.floor(x_min), np.ceil(x_max))
+                plt.plot(x_d, m*x_d + b, '-')
+        
         plt.show()
         
 app = GISApp()
