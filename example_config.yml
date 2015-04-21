@@ -1,29 +1,42 @@
 ﻿--- 
-original_dem: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\DEM\dv_utm11_clip.tif
-output: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Output
-project_name: death_valley
-projection_code: 32611
-pour_points: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Pour_Points.shp
-root: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal
-scratch: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Scratch
-
-flow_acc: 
-  flow_data_type: 'INTEGER'
-  flow_weight_raster: ""
-flow_dir: 
-  force_flow: 'NORMAL'
-str_net: 
-  conditional: "VALUE > 300"
-  false_constant: 0
-set_null: 
-  conditional: "VALUE = 0"
-  false_raster: 1
-str_ord: 
-  method: STRAHLER
-
-  
 climates: 
   - 
     name: mean_annual
-    precip_directory: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Climate\prec_12_tif
-    temp_directory: C:\Users\sb708\Documents\PhD Work\GIS\Death Valley Appraisal\Climate\tmean_12_tif
+    precip_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\prec_12_tif"
+    temp_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\tmean_12_tif"
+  - 
+    name: max_t_lgm_ccsm4
+    precip_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - CCSM4\\pr"
+    temp_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - CCSM4\\tx"
+  - 
+    name: min_t_lgm_ccsm4
+    precip_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - CCSM4\\pr"
+    temp_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - CCSM4\\tn"
+fault_path: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\dv_faults_labelled.shp"
+faults: 
+  cluster_tolerance: 1.5
+  search_radius: 20
+flow_acc: 
+  flow_data_type: INTEGER
+  flow_weight_raster: ""
+flow_dir: 
+  force_flow: NORMAL
+original_dem: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\DV_UTM11_CLIP1.tif"
+output: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Output"
+pour_points: 
+  minimum_height: 34
+  snap_distance: 30
+pour_points_path: ""
+project_name: death_valley
+projection_code: 32611
+root: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley"
+scratch: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Scratch"
+set_null: 
+  conditional: "VALUE = 0"
+  false_raster: 1
+str_net: 
+  conditional: "VALUE > 300"
+  false_constant: 0
+str_ord: 
+  method: STRAHLER
+uplift_mm_yr: 0
