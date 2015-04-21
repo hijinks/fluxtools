@@ -73,6 +73,7 @@ class GISbatch:
         self.scratch_path = config['scratch']
         self.output_path = config['output']
         self.original_dem = config['original_dem']
+        self.uplift_mm_yr = config['uplift_mm_yr']
         
         # Workflow variables
         self.flow_dir = config['flow_dir']
@@ -87,6 +88,9 @@ class GISbatch:
         # Climate variables
         self.climates = config['climates']
 
+        # Fault data
+        self.fault_meta_data = {}
+        
         
         # Set the environment variables
         arcpy.env.scratchWorkspace = self.scratch_path
@@ -186,8 +190,11 @@ class GISbatch:
             'null_path' : null_path,
             's_ord_path' : s_ord_path,
             'vector_streams' : vector_streams,
-            'fault_data': ''
+            'fault_data': '',
+            'fault_data_meta':'',
+            'uplift_rate':self.uplift_mm_yr
        }
+       
         with open(os.path.join(self.batch_path,'hydro_paths.yml'), 'w') as outfile:
             outfile.write(yaml.dump(hydro_paths, default_flow_style=True) )
         
@@ -196,6 +203,12 @@ class GISbatch:
     def fault_workflow(self, faultlines, hydro_paths):
         
         print('Starting Fault workflow')
+        
+        
+        print('Extracting fault data')
+        self.get_fault_data(faultlines)
+        
+        print(self.fault_meta_data)
         
         print('Find intersects of faults and streams')
         # Fault intersects
@@ -224,6 +237,7 @@ class GISbatch:
         # Updating yaml paths
         
         hydro_paths['fault_data'] = self.fault_data
+        hydro_paths['fault_meta_data'] = self.fault_meta_data
         
         with open(os.path.join(self.batch_path,'hydro_paths.yml'), 'w') as outfile:
             outfile.write(yaml.dump(hydro_paths, default_flow_style=True) )
@@ -282,7 +296,9 @@ class GISbatch:
         ez_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, hydro_paths['fill_path'], 'elev_data')
         
         print('Calculating Qs using BQART') 
-        qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path, hydro_paths['fault_data'])
+        qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path, 
+            hydro_paths['fault_data'], hydro_paths['fault_meta_data'], 
+            hydro_paths['uplift_rate'])
         
         self.save_data_to_csv(qs_data, climate_batch_path)
         
@@ -369,6 +385,19 @@ class GISbatch:
         
     # Fault stuff
         
+    def get_fault_data(self, faultlines):
+        fc = arcpy.SearchCursor(faultlines)
+        for row in fc:
+            # Get mean temperature
+            self.fault_meta_data.update({row.getValue('FID'):{
+                        'name':row.getValue('name'), 
+                        'slip_min':row.getValue('slip_min'),
+                        'slip_max':row.getValue('slip_max'), 
+                        'age_min':row.getValue('age_min'), 
+                        'age_max':row.getValue('age_max'), 
+                        'sense':row.getValue('sense')}})        
+                        
+        
     def fault_intersects(self, faultlines, streams, cluster_tolerance):
         inFeatures = [faultlines, streams]
         intersects_name = self.project_name + '_intersects_multipart.shp'
@@ -413,10 +442,11 @@ class GISbatch:
         
     def extract_intersect_positions(self, intersect_events):
         ic_cursor = arcpy.SearchCursor(intersect_events)
+        fieldnames = [field.name for field in arcpy.ListFields(intersect_events)]
         ic_data = []
         for row in ic_cursor:
             # Get mean temperature
-            ic_data.append([row.getValue('OID'), row.getValue('RID'), row.getValue('MEAS')])
+            ic_data.append([row.getValue('OID'), row.getValue(fieldnames[4]), row.getValue('MEAS')])
         
         intersect_data = os.path.join(self.batch_path, self.project_name + "_intersect_data.csv")
         row_headers = ['id', 'fault', 'distance']
@@ -545,7 +575,7 @@ class GISbatch:
         return outdata      
     
         
-    def do_bqart(self, pz_data, tz_data, ez_data, fault_data_path):
+    def do_bqart(self, pz_data, tz_data, ez_data, fault_data_path, fault_meta_data, uplift_rate):
         
         t_cursor = arcpy.SearchCursor(tz_data)
         p_cursor = arcpy.SearchCursor(pz_data)
@@ -571,7 +601,7 @@ class GISbatch:
             min_reliefs.update({row.getValue('VALUE'): row.getValue('MIN')})
             areas.update({row.getValue('VALUE'): row.getValue('AREA')})
         
-        fault_data = {}
+        fault_data_output = {}
         
         print('Adding fault data from')
         print(fault_data_path)
@@ -625,18 +655,39 @@ class GISbatch:
             Qs_T = Qs * float(1000000)
             density = 2700 # kg/m^3
             volume = Qs_T / float(density) # m^3
-            Area_cubic_m = A * float(1000000)
-            Qs_m_yr = volume / float(Area_cubic_m)  # m
+            Area_square_m = A * float(1000000) # m^2
+            Qs_m_yr = volume / float(Area_square_m)  # m
             Qs_mm_yr = Qs_m_yr * float(1000) # mm
+            
+
             
             qs = [k, precips[k], w, B, Q, A, R_km, T, Qs, Qs_T, density, volume, Qs_m_yr, Qs_mm_yr]
             if fault_data_output:
                 if fault_data_output[str(k)]:
-                    # Fault number
-                    qs.append(fault_data_output[str(k)][0])
-                    # Distance
-                    qs.append(fault_data_output[str(k)][1])
 
+                    fault_id = fault_data_output[str(k)][0]
+                    # We're using max
+                    fault_slip_mm_yr = fault_meta_data[int(fault_id)]['slip_max'] / float(1000)
+                    qs.append(fault_slip_mm_yr)
+                    
+                    Q_tectonic = Area_square_m * fault_slip_mm_yr
+                    
+                    # Simple Qs
+                    qs.append(Q_tectonic)                   
+                    
+                    # Fault number
+                    qs.append(fault_id)
+                    # Fault name
+                    qs.append(fault_meta_data[int(fault_id)]['name'])
+                    # Distance
+                    qs.append(fault_data_output[fault_id][1])
+            else:
+                Uplift_mm_yr = uplift_rate
+                Uplift_metres_yr = Uplift_mm_yr / float(1000)
+                Q_tectonic = Area_square_m * Uplift_metres_yr
+                qs.append(Uplift_mm_yr)
+                qs.append(Q_tectonic)
+                
             qs_rows.append(qs)
             
         return qs_rows
@@ -645,10 +696,11 @@ class GISbatch:
         data_name = 'qs_data.csv'
         row_headers = ['id', 'precipitation (mm/yr)', 'w', 'B', 'Q (kg/s)', 'A (km^2)', 
                        'R (km)', 'T(C)', 'Qs (MT/y)', 'Qs (T/y)', 'density (kg/m^3)', 'volume (m^3/yr)', 
-                       'erosion (m/yr)', 'erosion (mm/yr)']
+                       'erosion (m/yr)', 'erosion (mm/yr)', 'Slip (mm/yr)', 'Qs Tectonic (m^3/yr)']
                        
-        if len(qs_data[0]) > 14:
-            row_headers.append('fault_id')
+        if len(qs_data[0]) > 16:
+            row_headers.append('fault id')
+            row_headers.append('fault name')
             row_headers.append('distance')
         
         data_path = os.path.join(path, data_name)
@@ -735,6 +787,7 @@ try:
                         hydro_paths = 1
                     else:
                         print('File does not exist!')
+                
                 f = open(h_paths)
                 hydro_paths = yaml.load(f.read())
                 f.close()   
