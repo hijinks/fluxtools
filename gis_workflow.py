@@ -63,7 +63,7 @@ app = GISApp()
 class GISbatch:
     'Common base class for GIS batch processing'
    
-    def __init__(self, config):
+    def __init__(self, config, batch = False):
         self.project_root = config['root']
         self.project_name = config['project_name']
         self.projection_code = config['projection_code']
@@ -91,38 +91,25 @@ class GISbatch:
         # Fault data
         self.fault_meta_data = {}
         
-        
         # Set the environment variables
         arcpy.env.scratchWorkspace = self.scratch_path
-        self.batch_path = self.set_workspace()
-        arcpy.env.workspace = self.batch_path
-        
+        self.set_environment(batch)
+
         sr = arcpy.SpatialReference(self.projection_code)
         arcpy.env.outputCoordinateSystem = sr
 
         # Load in Spatial Analyst Toolbox
         arcpy.CheckOutExtension("Spatial")
     
-    def select_batch_directory(self, root_dir):
-        os.chdir(root_dir)
-        times = {}
-        days = {}
-        
-        for dir_name in glob.glob("*"):
-            t_frags = dir_name.split('_')
-            t_int = map(int, t_frags)
-            dt = datetime.datetime(t_int[0], t_int[1], t_int[2], t_int[3], t_int[4], t_int[5])
-            times.update({dir_name: dt})
-            ds = '_'.join([t_frags[0], t_frags[1], t_frags[2]])
-            days.update({ds:{}})
-                    
-        for k in times.keys():
-            t_frags = k.split('_')
-            ds = '_'.join([t_frags[0], t_frags[1], t_frags[2]])
-            t_string = times[k].strftime("%H:%M:%S")
-            days[ds].update({t_string:k})
-        
-        return days
+    
+    def set_environment(self, batch = False):
+        if batch:
+            self.batch_path = batch
+            arcpy.env.workspace = self.batch_path
+        else:
+            self.batch_path = self.set_workspace()
+            arcpy.env.workspace = self.batch_path
+
     
     def get_time_string(self):
         t = datetime.datetime.now()
@@ -203,7 +190,7 @@ class GISbatch:
     def fault_workflow(self, faultlines, hydro_paths):
         
         print('Starting Fault workflow')
-        
+
         
         print('Extracting fault data')
         self.get_fault_data(faultlines)
@@ -218,9 +205,13 @@ class GISbatch:
         # Multipart to singlepart
         intersects_singlepart = self.intersects_to_singlepart(intersects_multipart)
         
+        print('Removing low lying areas')
+        # Remove areas that are too low
+        self.highlands = self.remove_lowlands(self.pour_points['minimum_height'])
+        
         print('Removing pour point intersects below '+ str(self.pour_points['minimum_height']))
         # Extract pour points above minimum height 
-        pour_points = self.ignore_lowest_pp(intersects_singlepart, hydro_paths['fill_path'], self.pour_points['minimum_height'])
+        pour_points = self.ignore_lowest_pp(intersects_singlepart, self.highlands)
         
         print('Create fault routes')
         # Create fault routes
@@ -273,27 +264,52 @@ class GISbatch:
         return ws_path
 
 
-    def bqart_workflow(self, watershed_raster, hydro_paths, watershed_path, temp_directory, precip_directory):
+    def bqart_workflow(self, watershed_raster, hydro_paths, watershed_path, 
+                       temp_directory, precip_directory, climate_scenario):
         
         print('Starting BQART workflow')
         
         print('Creating climate batch directory')
         climate_batch_path = self.climate_batch_directory(watershed_path)
-        originals_batch_path = os.path.join(climate_batch_path, 'originals')
+        climate_cache_path = os.path.join(watershed_path, 'climate_cache')
         
-        print('Averaging precipitation rasters')
-        precip_raster_path = self.average_rasters(precip_directory, originals_batch_path, 'precip_combined.tif', 0)
-        print('Averaging temperature rasters')        
-        temp_raster_path = self.average_rasters(temp_directory, originals_batch_path, 'temp_combined.tif', 1)
+        precip_cache_check = self.check_climate_cache(watershed_path, climate_scenario, 't')
+        temp_cache_check = self.check_climate_cache(watershed_path, climate_scenario, 'p')
         
-        print('Clipping climate rasters') 
-        temp_clip = self.clip_raster(temp_raster_path, originals_batch_path, 'temp_clip.tif', watershed_raster)
-        precip_clip = self.clip_raster(precip_raster_path, originals_batch_path, 'precip_clip.tif', watershed_raster)
-        
+        if precip_cache_check:
+            print('Precipitation cache found')
+            precip_clip = temp_cache_check
+        else:
+            print('Averaging precipitation rasters')
+            datatype = 'p'
+            combined_name = datatype + '_' + climate_scenario + '_all.tif'
+            clip_name = datatype + '_' + climate_scenario + '_clip.tif'
+            
+            precip_raster_path = self.average_rasters(precip_directory, climate_cache_path, combined_name, 0)
+            
+            print('Clipping precipitation rasters')
+            precip_clip = self.clip_raster(precip_raster_path, climate_cache_path, clip_name, watershed_raster)
+            
+        if temp_cache_check:
+            print('Temperature cache found')
+            temp_clip = temp_cache_check
+        else:
+            datatype = 't'
+            combined_name = datatype + '_' + climate_scenario + '_all.tif'
+            clip_name = datatype + '_' + climate_scenario + '_clip.tif'
+            
+            print('Averaging temperature rasters')   
+            temp_raster_path = self.average_rasters(temp_directory, climate_cache_path, combined_name, 1)
+
+            print('Clipping temperature rasters')
+            temp_clip = self.clip_raster(temp_raster_path, climate_cache_path, clip_name, watershed_raster)
+            
+            
+            
         print('Climate zone statistics') 
         tz_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, temp_clip, 'temp_data')
         pz_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, precip_clip, 'precip_data')
-        ez_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, hydro_paths['fill_path'], 'elev_data')
+        ez_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, self.original_dem, 'elev_data')
         
         print('Calculating Qs using BQART') 
         qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path, 
@@ -413,15 +429,21 @@ class GISbatch:
         arcpy.MultipartToSinglepart_management(intersects_multipart, intersects_singlepart)
         
         return intersects_singlepart
+    
+    def remove_lowlands(self, minimum_height):
+        extract = ExtractByAttributes(self.original_dem, "VALUE > "+str(minimum_height))
+        dem_no_lowlands = os.path.join(self.batch_path, self.project_name + '_dem_no_lowlands.tif')
+        extract.save(dem_no_lowlands)
         
-        
-    def ignore_lowest_pp(self, intersects_singlepart, height_fill_raster, minimum_height):
+        return dem_no_lowlands
+
+    def ignore_lowest_pp(self, intersects_singlepart, dem_no_lowlands):
         intersect_heights = os.path.join(self.batch_path, self.project_name + '_intersects_all.shp')
-        ExtractValuesToPoints(intersects_singlepart, height_fill_raster, intersect_heights,
+        ExtractValuesToPoints(intersects_singlepart, dem_no_lowlands, intersect_heights,
                       "INTERPOLATE", "ALL") 
               
         intersect_heights_above = os.path.join(self.batch_path,  self.project_name + '_intersects_above.shp')
-        arcpy.Select_analysis(intersect_heights, intersect_heights_above, '"RASTERVALU" > '+str(minimum_height))
+        arcpy.Select_analysis(intersect_heights, intersect_heights_above, '"RASTERVALU" > 0')
         
         return intersect_heights_above
         
@@ -535,11 +557,22 @@ class GISbatch:
         climate_batch_path = os.path.join(watershed_directory, 'climate_calcs', str(timestamp))
         
         os.makedirs(climate_batch_path)
-        climate_originals_batch_path = os.path.join(climate_batch_path, 'originals')  
-        os.makedirs(climate_originals_batch_path)
+        
+        climate_cache_batch_path = os.path.join(watershed_directory, 'climate_cache')
+        if not os.path.isdir(climate_cache_batch_path):
+            os.makedirs(climate_cache_batch_path)
         
         return climate_batch_path
 
+    def check_climate_cache(self, watershed_directory, climate_scenario, datatype):
+        print('Checking for preexisting climate rasters')
+        raster_name = datatype + '_' + climate_scenario + '_clip.tif'
+        raster_cache_path = os.path.join(watershed_directory, 'climate_cache', raster_name)
+        output = False        
+        if os.path.isfile(raster_cache_path):
+            output = raster_cache_path
+        
+        return output
 
     def average_rasters(self, search_directory, save_directory, name, monthly):
         os.chdir(search_directory)
@@ -621,8 +654,6 @@ class GISbatch:
         del e_cursor
         
         # BQART
-        w = 0.0006
-        B = 1
         
         qs_rows = []
 
@@ -642,35 +673,69 @@ class GISbatch:
         
         
         for k in precips.keys():
-
-            # Multiply area (m^2) with mean annual precip (m) 
-            Q = math.pow(areas[k]*(precips[k]/float(1000)), 0.31)
-            # Converting area from m^2 to km^2
-            A = math.pow(areas[k]/float(1000000), 0.5)
-            # Converting elevation from m to km
-            R = max_reliefs[k] - min_reliefs[k]
-            R_km = R/ float(1000)
-            T = temps[k]/10 # Worldclim temps need to be divided by 10
-            Qs = w*B*Q*A*R_km*T
-            Qs_T = Qs * float(1000000)
-            density = 2700 # kg/m^3
-            volume = Qs_T / float(density) # m^3
-            Area_square_m = A * float(1000000) # m^2
-            Qs_m_yr = volume / float(Area_square_m)  # m
-            Qs_mm_yr = Qs_m_yr * float(1000) # mm
+ 
+            precip = precips[k] # mm/yr - yearly average
+            area_m_squared = areas[k] # m^2
+            relief = max_reliefs[k] - min_reliefs[k] # m
+            temp = temps[k]/10 # C - yearly average (Worldclim temps need to be divided by 10)
+            density = 2700
+            omega = 0.0006
+            B = 1
             
-
+            if k == 1:
+                print({
+                    'precip':precip,
+                    'area': area_m_squared,
+                    'relief':relief,
+                    'temp':temp
+                })
             
-            qs = [k, precips[k], w, B, Q, A, R_km, T, Qs, Qs_T, density, volume, Qs_m_yr, Qs_mm_yr]
+            # Convert precipitation to m/yr
+            precip_m = precip / float(1000)
+            
+            # Relief to km
+            relief_km = relief / float(1000)
+            
+            # Convert area to m^2
+            area_km_squared = area_m_squared / float(1000000)
+            
+            # Precipition to m^3/yr
+            precip_m3_yr = precip_m * float(area_m_squared)
+            
+            # Disharge m^3/s
+            Qw_s = precip_m3_yr / float((60*60*24*365))
+            
+            # Discharge km^3/yr
+            Qw_km_yr = math.pow(((Qw_s*31536000)/1000000000),0.31)
+            
+            # Area 
+            A = math.pow(area_km_squared, 0.5)
+            
+            # Qs in megatons per year
+            Qs_MT_yr = omega * B * Qw_km_yr * A * relief_km * temp
+            
+            # Qs m^3/yr
+            Qs_m3_yr = Qs_MT_yr*((1000000000/density)*1.3)           
+
+            Qs_m_yr = Qs_m3_yr / float(area_m_squared)
+            
+            Qs_mm_yr = Qs_m_yr * float(1000)            
+            
+            qs = [k, precips[k], omega, B, Qw_s, Qw_km_yr, A, relief_km, temp, Qs_MT_yr, density, Qs_m3_yr, Qs_m_yr, Qs_mm_yr]
+            if k == 1:
+                print(qs)
+            
             if fault_data_output:
                 if fault_data_output[str(k)]:
-
+                    
                     fault_id = fault_data_output[str(k)][0]
                     # We're using max
-                    fault_slip_mm_yr = fault_meta_data[int(fault_id)]['slip_max'] / float(1000)
+                    fault_slip_mm_yr = fault_meta_data[int(fault_id)]['slip_max']
                     qs.append(fault_slip_mm_yr)
                     
-                    Q_tectonic = Area_square_m * fault_slip_mm_yr
+                    # fault slip (m)
+                    # corrected for density
+                    Q_tectonic = (area_m_squared * (fault_slip_mm_yr/float(1000)))/float(density)
                     
                     # Simple Qs
                     qs.append(Q_tectonic)                   
@@ -680,7 +745,7 @@ class GISbatch:
                     # Fault name
                     qs.append(fault_meta_data[int(fault_id)]['name'])
                     # Distance
-                    qs.append(fault_data_output[fault_id][1])
+                    qs.append(fault_data_output[str(k)][1])
             else:
                 Uplift_mm_yr = uplift_rate
                 Uplift_metres_yr = Uplift_mm_yr / float(1000)
@@ -694,8 +759,8 @@ class GISbatch:
     
     def save_data_to_csv(self, qs_data, path):
         data_name = 'qs_data.csv'
-        row_headers = ['id', 'precipitation (mm/yr)', 'w', 'B', 'Q (kg/s)', 'A (km^2)', 
-                       'R (km)', 'T(C)', 'Qs (MT/y)', 'Qs (T/y)', 'density (kg/m^3)', 'volume (m^3/yr)', 
+        row_headers = ['id', 'precipitation (mm/yr)', 'w', 'B', 'Qw (m^3/s)', 'Qw (km^3/yr)', 'A (km^2)', 
+                       'R (km)', 'T(C)', 'Qs (MT/y)', 'density (kg/m^3)', 'Qs (m^3/yr)', 
                        'erosion (m/yr)', 'erosion (mm/yr)', 'Slip (mm/yr)', 'Qs Tectonic (m^3/yr)']
                        
         if len(qs_data[0]) > 16:
@@ -711,7 +776,79 @@ class GISbatch:
                 a.writerow(r)
          
         print('Data saved to '+data_path)
+    
+def save_last_run(root, key, val):
+    
+    last_run_path = os.path.join(root, 'last_run.yml')
+    
+    if os.path.isfile(last_run_path):
+        f = open(last_run_path)
+        last_run = yaml.load(f.read())
+        f.close()
+    else:
+        last_run = {}
         
+    last_run.update({key: val})
+    
+    with open(last_run_path, 'w') as outfile:
+        outfile.write(yaml.dump(last_run, default_flow_style=True))
+
+        
+def load_last_run(root):
+    # Check if last run exists
+    last_run = False
+
+    if os.path.exists(os.path.join(root, 'last_run.yml')):
+        f = open(os.path.join(root, 'last_run.yml'))
+        last_run = yaml.load(f.read())
+        f.close()
+    
+    return last_run
+
+def select_batch_directory(root_dir):
+    os.chdir(root_dir)
+    times = {}
+    days = {}
+    
+    for dir_name in glob.glob("*"):
+        t_frags = dir_name.split('_')
+        t_int = map(int, t_frags)
+        dt = datetime.datetime(t_int[0], t_int[1], t_int[2], t_int[3], t_int[4], t_int[5])
+        times.update({dir_name: dt})
+        ds = '_'.join([t_frags[0], t_frags[1], t_frags[2]])
+        days.update({ds:{}})
+                
+    for k in times.keys():
+        t_frags = k.split('_')
+        ds = '_'.join([t_frags[0], t_frags[1], t_frags[2]])
+        t_string = times[k].strftime("%H:%M:%S")
+        days[ds].update({t_string:k})
+    
+    d_strings = []
+    d_frag_list = []
+    
+    # Ask which days
+    for k in days:
+        d_frags = k.split('_')
+        d_int = map(int, d_frags)
+        dt = datetime.datetime(d_int[0], d_int[1], d_int[2])
+        d_strings.append(dt.strftime("%a %b %d %Y"))
+        d_frag_list.append(k)
+    
+    
+    p1 = shell.Prompt("Pick batch day", options = d_strings, numbered = True)
+    
+    # Ask which times
+    d_index = d_strings.index(p1.input)
+    d_choice = days[d_frag_list[d_index]]
+    
+    p2 = shell.Prompt("Pick batch time", options = d_choice.keys(), numbered = True)   
+    
+    choice = d_choice[p2.input]
+    
+    return choice
+
+         
 try:
     app.setup()
     
@@ -722,15 +859,40 @@ try:
             f = open(app.pargs.config)
             yaml_config = yaml.load(f.read())
             f.close()
-            gbatch = GISbatch(yaml_config)
+            
+            last_settings = load_last_run(yaml_config['root'])
+            hydro_batch = False
+            watershed_batch = False
+            
+            
+            if last_settings:
+                p = shell.Prompt("Use last use settings?", ['y','n'])
+                if p.input is 'y':
+                    if 'hydro_batch' in last_settings:
+                        hydro_batch = last_settings['hydro_batch']
+                      
+                    if 'watershed_batch' in last_settings:
+                        watershed_batch = last_settings['watershed_batch']          
             
             if app.skip_to_discharge == 0:
                 if app.skip_to_watersheds == 0:
+                    gbatch = GISbatch(yaml_config)
                     hydro_paths = gbatch.hydro_workflow()
+                    save_last_run(yaml_config['root'], 'hydro_batch', os.path.dirname(os.path.realpath(hydro_file_path)))
                 else:
                     try:
-                        hydro_file_path = os.path.join(gbatch.batch_path, 'hydro_paths.yml')
                         
+                        if hydro_batch:
+                            # Using last used hydro_batch
+                            gbatch = GISbatch(yaml_config, hydro_batch)
+                            hydro_file_path = os.path.join(hydro_batch, 'hydro_paths.yml')
+                        else:
+                            print 'Pick hydro path batch'
+                            tchoice = select_batch_directory(os.path.join(yaml_config['root'], 'Output'))
+                            batch = os.path.join(yaml_config['root'], 'Output', tchoice)
+                            gbatch = GISbatch(yaml_config, batch)
+                            hydro_file_path = os.path.join(gbatch.batch_path, 'hydro_paths.yml')
+                            
                         if os.path.exists(hydro_file_path):
                             f = open(hydro_file_path)
                             hydro_paths = yaml.load(f.read())
@@ -747,6 +909,8 @@ try:
                                     hydro_paths_exists = 1
                                 else:
                                     print('File does not exist!')
+                                    
+                        gbatch.save_last_run(yaml_config['root'], 'hydro_batch', os.path.dirname(os.path.realpath(hydro_file_path)))
                         
                     except (OSError, IOError) as e:
                         print(e)
@@ -780,49 +944,53 @@ try:
                 hydro_paths = 0
                 watershed_raster = 0
                 
-                while hydro_paths == 0:
-                    p = shell.Prompt("Path to hydro_paths config file: ")
-                    if os.path.exists(p.input):
-                        h_paths = p.input
-                        hydro_paths = 1
-                    else:
-                        print('File does not exist!')
-                
-                f = open(h_paths)
-                hydro_paths = yaml.load(f.read())
-                f.close()   
-                
-                h_dir = os.path.dirname(os.path.realpath(h_paths))
-                watershed_calcs = os.path.join(h_dir, 'watershed_calcs')
-                days = gbatch.select_batch_directory(watershed_calcs)
-                
-                # Choose watershed batch
-                d_strings = []
-                d_frag_list = []
-                
-                # Ask which days
-                for k in days:
-                    d_frags = k.split('_')
-                    d_int = map(int, d_frags)
-                    dt = datetime.datetime(d_int[0], d_int[1], d_int[2])
-                    d_strings.append(dt.strftime("%a %b %d %Y"))
-                    d_frag_list.append(k)
-                
-                
-                p1 = shell.Prompt("Pick batch day", options = d_strings, numbered = True)
+                if hydro_batch:
+                    # Using last used hydro_batch
+                    gbatch = GISbatch(yaml_config, hydro_batch)
+                    hydro_file_path = os.path.join(hydro_batch, 'hydro_paths.yml')
+                else:
+                    print 'Pick hydro path batch'
+                    tchoice = select_batch_directory(os.path.join(yaml_config['root'], 'Output'))
+                    batch = os.path.join(yaml_config['root'], 'Output', tchoice)
+                    gbatch = GISbatch(yaml_config, batch)
+                    hydro_file_path = os.path.join(gbatch.batch_path, 'hydro_paths.yml')
                     
-                # Ask which times
-                d_index = d_strings.index(p1.input)
-                d_choice = days[d_frag_list[d_index]]
-                                    
-                p2 = shell.Prompt("Pick batch time", options = d_choice.keys(), numbered = True)
+                if os.path.exists(hydro_file_path):
+                    f = open(hydro_file_path)
+                    hydro_paths = yaml.load(f.read())
+                    f.close()
+                else:
+                    print('Cannot find '+ hydro_file_path)
+                    hydro_paths_exists = 0
+                    while hydro_paths_exists == 0:
+                        p = shell.Prompt("Path to hydro_paths config file: ")
+                        if os.path.exists(p.input):
+                            f = open(p.input)
+                            hydro_paths = yaml.load(f.read())
+                            f.close() 
+                            hydro_paths_exists = 1
+                        else:
+                            print('File does not exist!')
+                            
+                h_dir = os.path.dirname(os.path.realpath(hydro_file_path))
+                save_last_run(yaml_config['root'], 'hydro_batch', h_dir)
                 
-                watershed_raster = os.path.join(watershed_calcs, 
-                                                d_choice[p2.input], 
-                            gbatch.project_name + '_watersheds.tif')
-                
-                watershed_directory = os.path.dirname(os.path.realpath(watershed_raster))
+                if watershed_batch:
+                     watershed_directory = watershed_batch
+                     watershed_raster = os.path.join(watershed_directory, 
+                                gbatch.project_name + '_watersheds.tif')    
+                else:
+                    print 'Pick watershed path batch'
+                    watershed_calcs = os.path.join(h_dir, 'watershed_calcs')
                     
+                    tchoice = select_batch_directory(watershed_calcs)
+                    
+                    watershed_raster = os.path.join(watershed_calcs, tchoice, 
+                                gbatch.project_name + '_watersheds.tif')
+                    
+                    watershed_directory = os.path.dirname(os.path.realpath(watershed_raster))
+                    save_last_run(yaml_config['root'], 'watershed_batch', watershed_directory)
+
             # Pick climate scenario
             climate_by_name = {}
             climate_names = []
@@ -838,7 +1006,7 @@ try:
             
             gbatch.bqart_workflow(watershed_raster, hydro_paths, 
                                   watershed_directory, temperature_directory, 
-                                  precipitation_directory)
+                                  precipitation_directory, p.input)
             
         except (OSError, IOError) as e:
             print(e)
