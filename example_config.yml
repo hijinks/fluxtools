@@ -12,7 +12,23 @@ climates:
     name: min_t_lgm_ccsm4
     precip_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - CCSM4\\pr"
     temp_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - CCSM4\\tn"
-fault_path: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\dv_faults_labelled.shp"
+  - 
+    name: min_t_lgm_mpi
+    precip_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - MPI - ESM - P\\pr"
+    temp_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - MPI - ESM - P\\tn"
+  - 
+    name: max_t_lgm_mpi
+    precip_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - MPI - ESM - P\\pr"
+    temp_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - MPI - ESM - P\\tx"
+  - 
+    name: min_t_lgm_miroc
+    precip_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - MIROC-ESM\\pr"
+    temp_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - MIROC-ESM\\tn"
+  - 
+    name: max_t_lgm_miroc
+    precip_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - MIROC-ESM\\pr"
+    temp_directory: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Climate\\LGM - MIROC-ESM\\tx"
+fault_path: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\dv_faults_normal.shp"
 faults: 
   cluster_tolerance: 1.5
   search_radius: 20
@@ -21,10 +37,11 @@ flow_acc:
   flow_weight_raster: ""
 flow_dir: 
   force_flow: NORMAL
-original_dem: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\DV_UTM11_CLIP1.tif"
+lithology_path: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\lithology.shp"
+original_dem: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Death_Valley_UTM.tif"
 output: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Output"
 pour_points: 
-  minimum_height: 34
+  minimum_height: 35
   snap_distance: 30
 pour_points_path: ""
 project_name: death_valley
