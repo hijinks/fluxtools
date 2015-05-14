@@ -341,12 +341,12 @@ class GISbatch:
                 f = open(os.path.join(watershed_path, 'watershed_paths.yml'))
                 w_paths = yaml.load(f.read())
                 f.close()
-                self.process_lithology(ez_dat_path, w_paths['ws_polygons'], self.lithology_path, climate_batch_path)
+                self.process_lithology(w_paths['ws_polygons'], self.lithology_path, climate_batch_path)
            
         print('Calculating Qs using BQART') 
         qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path, 
             hydro_paths['fault_data'], hydro_paths['fault_meta_data'], 
-            hydro_paths['uplift_rate'])
+            hydro_paths['uplift_rate'], w_paths['ws_polygons'])
         
         self.save_data_to_csv(qs_data, climate_batch_path)
         
@@ -576,6 +576,8 @@ class GISbatch:
         out_poly_name = self.project_name + '_poly_ws.shp'
         out_poly_path = os.path.join(self.watershed_batch_path, out_poly_name)
         arcpy.RasterToPolygon_conversion(ws_path, out_poly_path, "NO_SIMPLIFY", 'VALUE')      
+        arcpy.AddField_management(out_poly_path, 'AREA', "LONG")
+        arcpy.CalculateField_management(out_poly_path, 'AREA', '!SHAPE.AREA@SQUAREMETERS!', "PYTHON_9.3")
         
         return out_poly_path
         
@@ -687,11 +689,12 @@ class GISbatch:
         return outdata      
     
         
-    def do_bqart(self, pz_data, tz_data, ez_data, fault_data_path, fault_meta_data, uplift_rate):
+    def do_bqart(self, pz_data, tz_data, ez_data, fault_data_path, fault_meta_data, uplift_rate, polygons):
         
         t_cursor = arcpy.SearchCursor(tz_data)
         p_cursor = arcpy.SearchCursor(pz_data)
         e_cursor = arcpy.SearchCursor(ez_data)
+        w_cursor = arcpy.SearchCursor(polygons)
         
         temps = {}
         precips = {}
@@ -708,11 +711,13 @@ class GISbatch:
             precips.update({row.getValue('VALUE'): row.getValue('MEAN')})
             
         for row in e_cursor:
-            # Get highest, lowest elevation & area of waters====heds
+            # Get highest, lowest elevation & area of watersheds
             max_reliefs.update({row.getValue('VALUE'): row.getValue('MAX')})
             min_reliefs.update({row.getValue('VALUE'): row.getValue('MIN')})
-            areas.update({row.getValue('VALUE'): row.getValue('AREA')})
         
+        for row in w_cursor:
+            areas.update({row.getValue('FID'): row.getValue('AREA')})
+            
         fault_data_output = {}
         
         print('Adding fault data from')
@@ -730,6 +735,7 @@ class GISbatch:
         del t_cursor
         del p_cursor
         del e_cursor
+        del w_cursor
         
         # BQART
         
@@ -852,33 +858,27 @@ class GISbatch:
          
         print('Data saved to '+data_path)
     
-    def process_lithology(self, watershed_data, watershed_polygons, lithology, save_directory):
+    def process_lithology(self, watershed_polygons, lithology, save_directory):
         intersections = os.path.join(save_directory, 'lith_intersections.shp')
         lithology_data = os.path.join(save_directory, 'lithologies.csv')
         arcpy.Intersect_analysis ([watershed_polygons, lithology], intersections, "ALL", "", "")
-
-        w_cursor = arcpy.SearchCursor(watershed_data)
-        areas = {}          
-        for row in w_cursor:
-            areas.update({row.getValue('VALUE'): row.getValue('AREA')})
-        
-        # Read data
-        # NEED COMPLETE AREAS
+        arcpy.AddField_management(intersections, 'LITH_AREA', "LONG")
+        arcpy.CalculateField_management(intersections, 'LITH_AREA', '!SHAPE.AREA@SQUAREMETERS!', "PYTHON_9.3")     
         
         intObj = arcpy.SearchCursor(intersections)
+
+        
         i = 0
-        row_headers = ['id', 'catchment', 'lith', 'total area', 'lith area', 'perimeter', 'label', 'age', 'rocktype 1', 'rocktype 2']
+        row_headers = ['id', 'catchment', 'lith', 'total area', 'lith area', 'label', 'age', 'rocktype 1', 'rocktype 2']
         fieldnames = [field.name for field in arcpy.ListFields(intersections)]
         cols = []
         
         for row in intObj:
-            catchment = row.getValue(fieldnames[2])
-            if catchment in areas:
-                i = i+1
-                cols.append([i, catchment, row.getValue(fieldnames[5]), 
-                    areas[catchment], row.getValue(fieldnames[6]), row.getValue(fieldnames[6]), 
-                    row.getValue(fieldnames[10]), row.getValue(fieldnames[14]), 
-                    row.getValue(fieldnames[15]), row.getValue(fieldnames[16])])
+            i = i+1
+            cols.append([i, row.getValue(fieldnames[2]), row.getValue(fieldnames[6]), 
+                row.getValue('AREA'), row.getValue('LITH_AREA'),
+                row.getValue(fieldnames[11]), row.getValue(fieldnames[15]), 
+                row.getValue(fieldnames[16]), row.getValue(fieldnames[17])])
                  
                  
         with open(lithology_data, 'wb') as qs_file:
@@ -886,7 +886,10 @@ class GISbatch:
             a.writerow(row_headers)
             for r in cols:
                 a.writerow(r)   
-                
+
+        del row
+        del intObj
+               
     
 def save_last_run(root, key, val):
     
