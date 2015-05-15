@@ -767,7 +767,7 @@ class GISbatch:
             omega = 0.0006
             B = 1
             porosity = 0.3
-            
+              
             # Convert precipitation to m/yr
             precip_m = precip / float(1000)
             
@@ -789,15 +789,19 @@ class GISbatch:
             # Area 
             A = math.pow(area_km_squared, 0.5)
             
-            # Qs in megatons per year
-            Qs_MT_yr = omega * B * Qw_km_yr * A * relief_km * temp
+            if temp < 2:
+                # Qs in megatons per year
+                Qs_MT_yr = 2 * omega * B * Qw_km_yr * A * relief_km            
+            else:
+                Qs_MT_yr = omega * B * Qw_km_yr * A * relief_km * temp
             
             # Qs m^3/yr
-            Qs_m3_yr = Qs_MT_yr*((1000000000/density)*(1+porosity))           
+            Qs_m3_yr = Qs_MT_yr*((1000000000/density)*(1+porosity))       
 
             Qs_m_yr = Qs_m3_yr / float(area_m_squared)
             
-            Qs_mm_yr = Qs_m_yr * float(1000)            
+            Qs_mm_yr = Qs_m_yr * float(1000)
+            
             
             qs = [k, precip, omega, B,precip_m3_yr, Qw_s, Qw_km_yr, area_km_squared, A, relief_km, temp, Qs_MT_yr, porosity, density, Qs_m3_yr, Qs_m_yr, Qs_mm_yr]
             
@@ -869,16 +873,17 @@ class GISbatch:
 
         
         i = 0
-        row_headers = ['id', 'catchment', 'lith', 'total area', 'lith area', 'label', 'age', 'rocktype 1', 'rocktype 2']
+        row_headers = ['id', 'catchment', 'lith', 'total area', 'lith area', 'label', 'age', 'rocktype 1', 'rocktype 2', '%']
         fieldnames = [field.name for field in arcpy.ListFields(intersections)]
         cols = []
         
         for row in intObj:
             i = i+1
+            percent_cover = (float(row.getValue('LITH_AREA')) / float(row.getValue('AREA'))) * 100
             cols.append([i, row.getValue(fieldnames[2]), row.getValue(fieldnames[6]), 
                 row.getValue('AREA'), row.getValue('LITH_AREA'),
                 row.getValue(fieldnames[11]), row.getValue(fieldnames[15]), 
-                row.getValue(fieldnames[16]), row.getValue(fieldnames[17])])
+                row.getValue(fieldnames[16]), row.getValue(fieldnames[17]), percent_cover])
                  
                  
         with open(lithology_data, 'wb') as qs_file:
