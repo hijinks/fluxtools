@@ -38,6 +38,7 @@ flow_acc:
 flow_dir: 
   force_flow: NORMAL
 lithology_path: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\lithology.shp"
+lithology_values: ""
 original_dem: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Death_Valley_UTM.tif"
 output: "C:\\Users\\sb708\\Documents\\PhD Work\\GIS\\Death Valley\\Output"
 pour_points: 

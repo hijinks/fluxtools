@@ -69,6 +69,7 @@ class GISbatch:
         self.projection_code = config['projection_code']
         self.pour_points_path = config['pour_points_path']
         self.lithology_path = config['lithology_path']
+        self.lithology_values = config['lithology_values']
         self.fault_path = config['fault_path']
         self.fault_data = ''
         self.scratch_path = config['scratch']
@@ -335,18 +336,20 @@ class GISbatch:
         pz_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, precip_clip_resample, 'precip_data')
         ez_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, self.original_dem, 'elev_data')
         
+        l_values = False
+        
         if self.lithology_path:
             if os.path.exists(self.lithology_path):
                 print('Lithology')
                 f = open(os.path.join(watershed_path, 'watershed_paths.yml'))
                 w_paths = yaml.load(f.read())
                 f.close()
-                self.process_lithology(w_paths['ws_polygons'], self.lithology_path, climate_batch_path)
-           
+                l_values = self.process_lithology(w_paths['ws_polygons'], self.lithology_path, climate_batch_path)
+                            
         print('Calculating Qs using BQART') 
         qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path, 
             hydro_paths['fault_data'], hydro_paths['fault_meta_data'], 
-            hydro_paths['uplift_rate'], w_paths['ws_polygons'])
+            hydro_paths['uplift_rate'], w_paths['ws_polygons'], l_values)
         
         self.save_data_to_csv(qs_data, climate_batch_path)
         
@@ -689,7 +692,7 @@ class GISbatch:
         return outdata      
     
         
-    def do_bqart(self, pz_data, tz_data, ez_data, fault_data_path, fault_meta_data, uplift_rate, polygons):
+    def do_bqart(self, pz_data, tz_data, ez_data, fault_data_path, fault_meta_data, uplift_rate, polygons, l_values):
         
         t_cursor = arcpy.SearchCursor(tz_data)
         p_cursor = arcpy.SearchCursor(pz_data)
@@ -717,7 +720,7 @@ class GISbatch:
         
         for row in w_cursor:
             areas.update({row.getValue('FID'): row.getValue('AREA')})
-            
+        
         fault_data_output = {}
         
         print('Adding fault data from')
@@ -728,6 +731,7 @@ class GISbatch:
                     fault_data = csv.reader(csvfile, delimiter=',')
                     for row in fault_data:
                         fault_data_output.update({row[0]: [row[1], row[2]]})
+        
         # Unlock data
 
         
@@ -765,7 +769,15 @@ class GISbatch:
             temp = temps[k]/10 # C - yearly average (Worldclim temps need to be divided by 10)
             density = 2700 # kg/m^3
             omega = 0.0006
-            B = 1
+            if l_values:
+                I = 1 # 
+                L = l_values[k] # Lithology factor
+                Te = 0
+                Eb = 1
+                B = I * L * (1 - Te) * Eb
+            else:
+                B = 1
+            
             porosity = 0.3
               
             # Convert precipitation to m/yr
@@ -796,7 +808,7 @@ class GISbatch:
                 Qs_MT_yr = omega * B * Qw_km_yr * A * relief_km * temp
             
             # Qs m^3/yr
-            Qs_m3_yr = Qs_MT_yr*((1000000000/density)*(1+porosity))       
+            Qs_m3_yr = Qs_MT_yr*((1000000000/density)*(1+porosity))
 
             Qs_m_yr = Qs_m3_yr / float(area_m_squared)
             
@@ -863,6 +875,7 @@ class GISbatch:
         print('Data saved to '+data_path)
     
     def process_lithology(self, watershed_polygons, lithology, save_directory):
+        
         intersections = os.path.join(save_directory, 'lith_intersections.shp')
         lithology_data = os.path.join(save_directory, 'lithologies.csv')
         arcpy.Intersect_analysis ([watershed_polygons, lithology], intersections, "ALL", "", "")
@@ -871,7 +884,6 @@ class GISbatch:
         
         intObj = arcpy.SearchCursor(intersections)
 
-        
         i = 0
         row_headers = ['id', 'catchment', 'lith', 'total area', 'lith area', 'label', 'age', 'rocktype 1', 'rocktype 2', '%']
         fieldnames = [field.name for field in arcpy.ListFields(intersections)]
@@ -880,22 +892,98 @@ class GISbatch:
         for row in intObj:
             i = i+1
             percent_cover = (float(row.getValue('LITH_AREA')) / float(row.getValue('AREA'))) * 100
-            cols.append([i, row.getValue(fieldnames[2]), row.getValue(fieldnames[6]), 
+            cols.append([i,row.getValue(fieldnames[2]), row.getValue(fieldnames[6]), 
                 row.getValue('AREA'), row.getValue('LITH_AREA'),
                 row.getValue(fieldnames[11]), row.getValue(fieldnames[15]), 
                 row.getValue(fieldnames[16]), row.getValue(fieldnames[17]), percent_cover])
                  
-                 
+        
         with open(lithology_data, 'wb') as qs_file:
             a = csv.writer(qs_file, delimiter=',')
             a.writerow(row_headers)
             for r in cols:
-                a.writerow(r)   
+                a.writerow(r) 
 
-        del row
+
         del intObj
-               
-    
+        
+        lith_values = False
+        
+        while not lith_values:
+            
+            lith_path = False
+            
+            if not self.lithology_values:
+                print('Lithology values not yet specified:')
+                p1 = shell.Prompt("Path to lithology values")
+                if os.path.exists(p1.input):
+                    lith_path = p1.input
+            else:
+                if os.path.exists(self.lithology_values):
+                    lith_path = self.lithology_values
+                else:
+                    print('File does not exist')
+            
+            if lith_path:
+                lith_values = {}
+                with open(lith_path, 'rb') as csvfile:
+                    lith_value_data = csv.reader(csvfile, delimiter=',')
+                    for row in lith_value_data:
+                        lith_values[row[0]] = row[1]
+        
+        # Update lithology csv & collate per-catchment averaged lithology values
+        catchment_lithologies = {}
+        lith_segment_rows = []
+        
+        with open(lithology_data, 'rb') as csvfile:
+            segment_rows = csv.reader(csvfile, delimiter=',')
+            row_headers.append('L')
+            for row in segment_rows:
+                lv = 1
+                
+                # Get lithology value from rocktype 1
+                if row[7] in lith_values:
+                    lv = lith_values[row[7]]
+                
+                try:
+                    c_id = int(row[1])
+                    # Save each lith segment for each catchment
+                    if c_id in catchment_lithologies:
+                        catchment_lithologies[c_id].append([float(lv), float(row[9])])
+                    else:
+                        catchment_lithologies[c_id] = [[float(lv), float(row[9])]]
+                        
+                    row.append(lv)
+                    lith_segment_rows.append(row)
+                    
+                except Exception as e:
+                    del e
+                    
+                # Save L value to new row                
+
+        
+        # Rewrite lithology.csv
+        os.remove(lithology_data)
+        with open(lithology_data, 'wb') as lith_data_file:
+            a = csv.writer(lith_data_file, delimiter=',')
+            a.writerow(row_headers)
+            for r in lith_segment_rows:
+                a.writerow(r)
+                    
+        l_values = {}
+        for c in catchment_lithologies.keys():
+            l_sum = 0
+            for v in catchment_lithologies[c]:
+                l_sum = l_sum + (float(v[0]) * (float(v[1])/100))
+            
+            l_values[int(c)] = l_sum
+            
+        del row
+        del r
+
+        return l_values
+        
+        
 def save_last_run(root, key, val):
     
     last_run_path = os.path.join(root, 'last_run.yml')
