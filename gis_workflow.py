@@ -337,15 +337,19 @@ class GISbatch:
         ez_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, self.original_dem, 'elev_data')
         
         l_values = False
-        
+                
+        f = open(os.path.join(watershed_path, 'watershed_paths.yml'))
+        w_paths = yaml.load(f.read())
+        f.close()
+                
         if self.lithology_path:
             if os.path.exists(self.lithology_path):
                 print('Lithology')
-                f = open(os.path.join(watershed_path, 'watershed_paths.yml'))
-                w_paths = yaml.load(f.read())
-                f.close()
                 l_values = self.process_lithology(w_paths['ws_polygons'], self.lithology_path, climate_batch_path)
-                            
+            else:
+                print('Could not find lithology path')
+                print(self.lithology_path)
+        
         print('Calculating Qs using BQART') 
         qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path, 
             hydro_paths['fault_data'], hydro_paths['fault_meta_data'], 
