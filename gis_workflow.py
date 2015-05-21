@@ -278,6 +278,9 @@ class GISbatch:
         
         print('Starting BQART workflow')
         
+        # Are we ignoring any catchments?
+        ignore = self.ignore_catchments(watershed_path)
+        
         print('Creating climate batch directory')
         climate_batch_path = self.climate_batch_directory(watershed_path, climate_scenario)
         climate_cache_path = os.path.join(watershed_path, 'climate_cache', climate_scenario)
@@ -355,7 +358,7 @@ class GISbatch:
             hydro_paths['fault_data'], hydro_paths['fault_meta_data'], 
             hydro_paths['uplift_rate'], w_paths['ws_polygons'], l_values)
         
-        self.save_data_to_csv(qs_data, climate_batch_path)
+        self.save_data_to_csv(qs_data, climate_batch_path, ignore)
         
     # ARC GIS PROCESSES
     # Hydro stuff
@@ -763,6 +766,8 @@ class GISbatch:
         # relief is in m
         # area is m^2
         
+        # Are we ignoring any catchments?
+        
         
         for k in precips.keys():
  
@@ -802,7 +807,7 @@ class GISbatch:
             # Discharge km^3/yr
             Qw_km_yr = math.pow(((Qw_s*(60*60*24*365))/1000000000),0.31)
             
-            # Area 
+            # Area
             A = math.pow(area_km_squared, 0.5)
             
             if temp < 2:
@@ -838,8 +843,9 @@ class GISbatch:
                     Q_tectonic_min = (area_m_squared * (min_fault_slip_mm_yr/float(1000)))
                     
                     # Simple Qs
-                    qs.append(Q_tectonic_max)                   
-                    qs.append(Q_tectonic_min)  
+                    qs.append(Q_tectonic_max)               
+                    qs.append(Q_tectonic_min) 
+                    
                     # Fault number
                     qs.append(fault_id)
                     # Fault name
@@ -857,7 +863,7 @@ class GISbatch:
             
         return qs_rows
     
-    def save_data_to_csv(self, qs_data, path):
+    def save_data_to_csv(self, qs_data, path, ignore):
         data_name = 'qs_data.csv'
         row_headers = ['id', 'precipitation (mm/yr)', 'w', 'B', 'Discharge', 'Qw (m^3/s)', 'Qw (km^3/yr)', 'A (km^2)', 'A^0.5', 
                        'R (km)', 'T(C)', 'Qs (MT/y)', 'porosity', 'density (kg/m^3)', 'Qs (m^3/yr)', 
@@ -873,10 +879,31 @@ class GISbatch:
         with open(data_path, 'wb') as qs_file:
             a = csv.writer(qs_file, delimiter=',')
             a.writerow(row_headers)
-            for r in qs_data:
-                a.writerow(r)
+            if ignore:
+                for r in qs_data:
+                    if not r[0] in ignore:
+                        a.writerow(r)
+            else:
+                for r in qs_data:
+                    a.writerow(r)                
+            
          
         print('Data saved to '+data_path)
+    
+    def ignore_catchments(self, watershed_directory):
+        
+        ignore = False
+        ignore_path = os.path.join(watershed_directory, 'ignore_catchments.txt')        
+        
+        if os.path.exists(ignore_path):
+            with open(ignore_path) as f:
+                c_ids = f.readlines()
+
+            ignore = map(int, c_ids)
+
+        
+        return ignore
+        
     
     def process_lithology(self, watershed_polygons, lithology, save_directory):
         
