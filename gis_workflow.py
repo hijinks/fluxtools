@@ -726,7 +726,11 @@ class GISbatch:
             min_reliefs.update({row.getValue('VALUE'): row.getValue('MIN')})
         
         for row in w_cursor:
-            areas.update({row.getValue('FID'): row.getValue('AREA')})
+            c_id = row.getValue('GRIDCODE')
+            if c_id in areas:
+                areas[c_id] = areas[c_id] + float(row.getValue('AREA'))
+            else:
+                areas.update({c_id: float(row.getValue('AREA'))})
         
         fault_data_output = {}
         
@@ -923,7 +927,7 @@ class GISbatch:
         for row in intObj:
             i = i+1
             percent_cover = (float(row.getValue('LITH_AREA')) / float(row.getValue('AREA'))) * 100
-            cols.append([i,row.getValue(fieldnames[2]), row.getValue(fieldnames[6]), 
+            cols.append([i,int(row.getValue('GRIDCODE')), row.getValue(fieldnames[6]), 
                 row.getValue('AREA'), row.getValue('LITH_AREA'),
                 row.getValue(fieldnames[11]), row.getValue(fieldnames[15]), 
                 row.getValue(fieldnames[16]), row.getValue(fieldnames[17]), percent_cover])
