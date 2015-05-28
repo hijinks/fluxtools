@@ -76,6 +76,7 @@ class GISbatch:
         self.output_path = config['output']
         self.original_dem = config['original_dem']
         self.uplift_mm_yr = config['uplift_mm_yr']
+        self.min_area = config['min_area']
         
         # Workflow variables
         self.flow_dir = config['flow_dir']
@@ -340,11 +341,11 @@ class GISbatch:
         ez_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, self.original_dem, 'elev_data')
         
         l_values = False
-                
+
         f = open(os.path.join(watershed_path, 'watershed_paths.yml'))
         w_paths = yaml.load(f.read())
         f.close()
-                
+        
         if self.lithology_path:
             if os.path.exists(self.lithology_path):
                 print('Lithology')
@@ -358,7 +359,9 @@ class GISbatch:
             hydro_paths['fault_data'], hydro_paths['fault_meta_data'], 
             hydro_paths['uplift_rate'], w_paths['ws_polygons'], l_values)
         
-        self.save_data_to_csv(qs_data, climate_batch_path, ignore)
+        catchment_ids, catchment_data = self.save_data_to_csv(qs_data, climate_batch_path, ignore, climate_scenario)
+        
+        self.extract_catchments(w_paths['ws_polygons'], catchment_ids, catchment_data, climate_batch_path, climate_scenario)
         
     # ARC GIS PROCESSES
     # Hydro stuff
@@ -589,6 +592,49 @@ class GISbatch:
         arcpy.AddField_management(out_poly_path, 'AREA', "LONG")
         arcpy.CalculateField_management(out_poly_path, 'AREA', '!SHAPE.AREA@SQUAREMETERS!', "PYTHON_9.3")
         
+        # Ignore off cuts
+        
+        fields = ('FID', 'GRIDCODE', 'AREA')
+        gcodes = []
+        to_delete = []
+        duplicates = {}
+        fids = []
+        areas = []
+        
+        with arcpy.da.SearchCursor(out_poly_path, fields) as sc:
+            for row in sc:
+                fids.append(row[0])
+                gcodes.append(row[1])
+                areas.append(row[2])
+        
+        i = 0
+        for g in gcodes:
+            if gcodes.count(g) >1:
+                if g in duplicates:
+                    duplicates[g].append(i)
+                else:
+                    duplicates[g] = [i]
+            
+            i = i+1
+        
+        for k, d in duplicates.iteritems():
+            a1 = areas[d[0]]
+            a2 = areas[d[1]]
+            
+            if (a1-a2) < 0:
+                to_delete.append(fids[d[0]])
+            else:
+                to_delete.append(fids[d[1]])
+        
+        with arcpy.da.UpdateCursor(out_poly_path, fields) as uc:
+            for row in uc:
+                if row[0] in to_delete:
+                    uc.deleteRow()
+        
+        del row
+        del uc
+        del sc
+        
         return out_poly_path
         
     
@@ -782,6 +828,7 @@ class GISbatch:
             temp = temps[k]/10 # C - yearly average (Worldclim temps need to be divided by 10)
             density = 2700 # kg/m^3
             omega = 0.0006
+            
             if l_values:
                 I = 1 # 
                 L = l_values[k] # Lithology factor
@@ -847,8 +894,8 @@ class GISbatch:
                     Q_tectonic_min = (area_m_squared * (min_fault_slip_mm_yr/float(1000)))
                     
                     # Simple Qs
-                    qs.append(Q_tectonic_max)               
-                    qs.append(Q_tectonic_min) 
+                    qs.append(Q_tectonic_min)
+                    qs.append(Q_tectonic_max)
                     
                     # Fault number
                     qs.append(fault_id)
@@ -867,33 +914,51 @@ class GISbatch:
             
         return qs_rows
     
-    def save_data_to_csv(self, qs_data, path, ignore):
-        data_name = 'qs_data.csv'
+    def save_data_to_csv(self, qs_data, path, ignore, scenario):
+        data_name = scenario+'_data.csv'
         row_headers = ['id', 'precipitation (mm/yr)', 'w', 'B', 'Discharge', 'Qw (m^3/s)', 'Qw (km^3/yr)', 'A (km^2)', 'A^0.5', 
                        'R (km)', 'T(C)', 'Qs (MT/y)', 'porosity', 'density (kg/m^3)', 'Qs (m^3/yr)', 
                        'erosion (m/yr)', 'erosion (mm/yr)', 'Slip max (mm/yr)', 'Slip min (mm/yr)', 'Qs tectonic min (m^3/yr)', 
                        'Qs tectonic max (m^3/yr)']
                        
+        
         if len(qs_data[0]) > 19:
             row_headers.append('fault id')
             row_headers.append('fault name')
             row_headers.append('distance')
         
         data_path = os.path.join(path, data_name)
+        
+        if self.min_area:
+            r_qs_data = qs_data
+            qs_data = []
+            for r in r_qs_data:
+                area_m2 = r[7] * float(1000000)
+                if area_m2 > self.min_area:
+                    qs_data.append(r)
+
+            
+        catchment_data = {}
+        catchment_ids = []
+        
         with open(data_path, 'wb') as qs_file:
             a = csv.writer(qs_file, delimiter=',')
             a.writerow(row_headers)
             if ignore:
                 for r in qs_data:
                     if not r[0] in ignore:
+                        catchment_ids.append(r[0])
+                        catchment_data[r[0]] = r
                         a.writerow(r)
             else:
                 for r in qs_data:
-                    a.writerow(r)                
-            
-         
+                    catchment_ids.append(r[0])
+                    catchment_data[r[0]] = r
+                    a.writerow(r)          
+                    
         print('Data saved to '+data_path)
-    
+        return catchment_ids, catchment_data
+        
     def ignore_catchments(self, watershed_directory):
         
         ignore = False
@@ -905,7 +970,6 @@ class GISbatch:
 
             ignore = map(int, c_ids)
 
-        
         return ignore
         
     
@@ -932,7 +996,6 @@ class GISbatch:
                 row.getValue(fieldnames[11]), row.getValue(fieldnames[15]), 
                 row.getValue(fieldnames[16]), row.getValue(fieldnames[17]), percent_cover])
                  
-        
         with open(lithology_data, 'wb') as qs_file:
             a = csv.writer(qs_file, delimiter=',')
             a.writerow(row_headers)
@@ -994,7 +1057,7 @@ class GISbatch:
                 except Exception as e:
                     del e
                     
-                # Save L value to new row                
+                # Save L value to new row
 
         
         # Rewrite lithology.csv
@@ -1017,6 +1080,41 @@ class GISbatch:
         del r
 
         return l_values
+        
+    def extract_catchments(self, polygons, catchment_ids, catchment_data, climate_batch_path, climate_scenario):
+        
+        ws_extracted_name = 'catchments_'+climate_scenario+'.shp'
+        ws_extracted_path = os.path.join(climate_batch_path, ws_extracted_name)
+        catchment_ids = map(str,catchment_ids)
+        comma = ','
+        id_string = comma.join(catchment_ids)
+        
+        arcpy.Select_analysis(polygons, ws_extracted_path, '"GRIDCODE" IN('+id_string+')')
+
+        ws_headers = ['precip', 'B', 'Qw', 'R_km', 'temp', 'Qs', 'erosion', 'slip_min', 'slip_max']
+        
+        for wh in ws_headers:
+            arcpy.AddField_management(ws_extracted_path, wh, "FLOAT")
+        
+        fields = ("GRIDCODE",'precip', 'B', 'Qw', 'R_km', 'temp', 'Qs', 'erosion', 'slip_min', 'slip_max')
+        
+        with arcpy.da.UpdateCursor(ws_extracted_path, fields) as cursor:
+            for r in cursor:
+                gcode = r[0]
+                if gcode in catchment_data:
+                    c_dat = catchment_data[gcode]
+                    r[1] = c_dat[1] # Precipitation
+                    r[2] = c_dat[3] # B
+                    r[3] = c_dat[5] # Qw
+                    r[4] = c_dat[9] # R_km
+                    r[5] = c_dat[10] # temp
+                    r[6] = c_dat[14] # Qs
+                    r[7] = c_dat[16] # erosion
+                    r[8] = c_dat[17] # slip_min
+                    r[9] = c_dat[18] # slip_max
+                    cursor.updateRow(r)
+          
+        
         
         
 def save_last_run(root, key, val):
