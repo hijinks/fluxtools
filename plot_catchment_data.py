@@ -16,6 +16,32 @@ from cement.core import foundation, controller
 from cement.core.controller import expose
 from cement.utils import shell
 
+columns = ['id',
+    'precipitation',
+    'w',
+    'B',
+    'Qw_m_s',
+    'Qw_km3_yr',
+    'A_km2',
+    'R_km',
+    'T',
+    'Qs_MT_y',
+    'porosity',
+    'density',
+    'Qs',
+    'Qs_m3_yr',
+    'erosion_m_yr',
+    'erosion_mm_yr',
+    'Slip_mm_yr',
+    'Slip_min_mm_yr',
+    'Qs_tectonic_min_m3_yr',
+    'Qs tectonic_max_m3_yr',
+    'fault_id',
+    'fault_name',
+    'distance',
+    'QS_Tectonic_Average',
+    'Error']
+
 class GISAppController(controller.CementBaseController):
     class Meta:
         label = 'base'

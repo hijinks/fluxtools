@@ -31,6 +31,8 @@ class GISAppController(controller.CementBaseController):
                       help='path to config file') ),
             ( ['-b', '--batch'], dict(action='store', dest='batch',
                       help='path to batch directory') ),
+            ( ['-pp', '--pourpoints'], dict(action='store', dest='custom_pp',
+                      help='custom pour points') ),
             ]
 
     @expose(hide=True, aliases=['run'])
@@ -46,13 +48,27 @@ class GISAppController(controller.CementBaseController):
     def calculate_bqart(self):
         print("Skipping to discharge calculations")
         self.app.skip_to_watersheds = 1
-        self.app.skip_to_discharge = 1        
-        
+        self.app.skip_to_discharge = 1
+
+    @expose(help='Use pre-made catchment polygon (CODE & ALIAS columns required)')
+    def custom_pour_points(self):
+        print("Using specific watershed polygon")
+        self.app.custom_pour_points = 1
+
+    @expose(help='Prepare watersheds for Fastscape processing')
+    def fastscape(self):
+        print("Fastscape processing")
+        self.app.fastscape_process = 1
+        self.app.skip_to_discharge = 1
+        self.app.skip_to_watersheds = 1
+
 class GISApp(foundation.CementApp):
     
     skip_to_watersheds = 0
     skip_to_discharge = 0
-    
+    custom_pour_points = 0
+    fastscape_process = 0
+
     class Meta:
         label = 'GIS_Automator'
         base_controller = GISAppController
@@ -77,8 +93,10 @@ class GISbatch:
         self.original_dem = config['original_dem']
         self.uplift_mm_yr = config['uplift_mm_yr']
         self.min_area = config['min_area']
+        self.fan_toes = config['fan_toes']
         
         # Workflow variables
+        self.fill_check = config['fill']
         self.flow_dir = config['flow_dir']
         self.flow_acc = config['flow_acc']
         self.str_net = config['str_net']
@@ -90,6 +108,7 @@ class GISbatch:
         
         # Climate variables
         self.climates = config['climates']
+        self.climate_basic = config['climate_basic']
 
         # Fault data
         self.fault_meta_data = {}
@@ -104,7 +123,9 @@ class GISbatch:
         # Load in Spatial Analyst Toolbox
         arcpy.CheckOutExtension("Spatial")
     
-    
+    def set_custom_pp(self, path):
+        self.pour_points_path = path
+
     def set_environment(self, batch = False):
         if batch:
             self.batch_path = batch
@@ -151,10 +172,13 @@ class GISbatch:
         print('Starting Hydrology Workflow...')
       
         print('Fill')
-        fill_path = self.fill()
-        
+        if self.fill_check:
+            dem = self.fill()
+        else:
+            dem = self.original_dem
+
         print('Flow direction')
-        flow_path = self.flow_direction(fill_path)
+        flow_path = self.flow_direction(dem)
         
         print('Flow accumulation')
         flow_acc_path = self.flow_accumulation(flow_path)
@@ -173,7 +197,7 @@ class GISbatch:
         
         # Save file values to YAML file
         hydro_paths = {
-            'fill_path' : fill_path,
+            'working_dem' : dem,
             'flow_path' : flow_path,
             'flow_acc_path' : flow_acc_path,
             'stream_net_path' : stream_net_path,
@@ -261,22 +285,38 @@ class GISbatch:
         print('Converting to polygons')
         ws_polygons = self.ws_to_poly(ws_path)
 
-        
+
+
         watershed_paths = {
             'pour_points' : snap_pp_path,
+            'pour_points_vector': pp_path,
             'watersheds' : ws_path,
             'ws_polygons' : ws_polygons
         }
-        
+
+        if self.fan_toes:
+            print('Measuring fan lengths')
+
+            fan_toe_lengths = self.fan_toe_lengths(self.fan_toes, pp_path)
+            fan_toe_file = os.path.join(self.watershed_batch_path,'fan_toes.csv')
+            writer = csv.writer(open(fan_toe_file, 'wb'))
+            for key, value in fan_toe_lengths.iteritems():
+               writer.writerow([key, value])
+
+            watershed_paths.update({'fan_toes': fan_toe_file})
+
         with open(os.path.join(self.watershed_batch_path,'watershed_paths.yml'), 'w') as outfile:
             outfile.write(yaml.dump(watershed_paths, default_flow_style=True) )
-            
+
+
         return ws_path
 
 
     def bqart_workflow(self, watershed_raster, hydro_paths, watershed_path, 
                        temp_directory, precip_directory, climate_scenario, clear_cache):
-        
+
+        precip_run = False
+
         print('Starting BQART workflow')
         
         # Are we ignoring any catchments?
@@ -285,59 +325,66 @@ class GISbatch:
         print('Creating climate batch directory')
         climate_batch_path = self.climate_batch_directory(watershed_path, climate_scenario)
         climate_cache_path = os.path.join(watershed_path, 'climate_cache', climate_scenario)
-        
-        precip_cache_check = self.check_climate_cache(watershed_path, climate_scenario, 't')
-        temp_cache_check = self.check_climate_cache(watershed_path, climate_scenario, 'p')
-        
-        if clear_cache:
-            p = shell.Prompt("Continue to overwrite previous climate rasters", ['y','n'])
-            if p.input is 'y':
-                self.clear_cache(watershed_path, climate_scenario)
-                precip_cache_check = False
-                temp_cache_check = False
+
+        if climate_scenario.startswith('_basic_'):
+
+            # Just go with it
+            temp_val = temp_directory
+            precip_val = precip_directory
+        else:
+            precip_cache_check = self.check_climate_cache(watershed_path, climate_scenario, 't')
+            temp_cache_check = self.check_climate_cache(watershed_path, climate_scenario, 'p')
+
+            if clear_cache:
+                p = shell.Prompt("Continue to overwrite previous climate rasters", ['y','n'])
+                if p.input is 'y':
+                    self.clear_cache(watershed_path, climate_scenario)
+                    precip_cache_check = False
+                    temp_cache_check = False
+                else:
+                    exit
+
+            if precip_cache_check:
+                print('Precipitation cache found')
+                precip_clip_resample = temp_cache_check
             else:
-                exit
 
-        if precip_cache_check:
-            print('Precipitation cache found')
-            precip_clip_resample = temp_cache_check
-        else:
-            
-            datatype = 'p'
-            combined_name = datatype + '_' + climate_scenario + '_all.tif'
-            clip_name_root = datatype + '_' + climate_scenario + '_clip'
-            resample_name = datatype + '_' + climate_scenario + '_resample.tif'
-            
-            print('Clipping precipitation rasters')
-            precip_clip_dir = self.clip_rasters(precip_directory, climate_cache_path, datatype, clip_name_root, watershed_raster)
-            
-            print('Averaging precipitation rasters')
-            precip_averaged = self.average_rasters(precip_clip_dir, climate_cache_path, combined_name, 0)            
-            
-            print('Resampling precipitation rasters')
-            precip_clip_resample = self.resample_climate_raster(precip_averaged, watershed_raster, climate_cache_path, resample_name)
-            
-        if temp_cache_check:
-            print('Temperature cache found')
-            temp_clip_resample = temp_cache_check
-        else:
-            datatype = 't'
-            combined_name = datatype + '_' + climate_scenario + '_all.tif'
-            clip_name_root = datatype + '_' + climate_scenario + '_clip'
-            resample_name = datatype + '_' + climate_scenario + '_resample.tif'
+                datatype = 'p'
+                combined_name = datatype + '_' + climate_scenario + '_all.tif'
+                clip_name_root = datatype + '_' + climate_scenario + '_clip'
+                resample_name = datatype + '_' + climate_scenario + '_resample.tif'
 
-            print('Clipping temperature rasters')
-            temp_clip_dir = self.clip_rasters(temp_directory, climate_cache_path, datatype, clip_name_root, watershed_raster)
-            
-            print('Averaging temperature rasters')   
-            temp_averaged = self.average_rasters(temp_clip_dir, climate_cache_path, combined_name, 1)
-            
-            print('Resampling temperature rasters')
-            temp_clip_resample = self.resample_climate_raster(temp_averaged, watershed_raster, climate_cache_path, resample_name)
-            
-        print('Climate zone statistics') 
-        tz_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, temp_clip_resample, 'temp_data')
-        pz_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, precip_clip_resample, 'precip_data')
+                print('Clipping precipitation rasters')
+                precip_clip_dir = self.clip_rasters(precip_directory, climate_cache_path, datatype, clip_name_root, watershed_raster)
+
+                print('Averaging precipitation rasters')
+                precip_averaged = self.average_rasters(precip_clip_dir, climate_cache_path, combined_name, 0)
+
+                print('Resampling precipitation rasters')
+                precip_clip_resample = self.resample_climate_raster(precip_averaged, watershed_raster, climate_cache_path, resample_name)
+
+            if temp_cache_check:
+                print('Temperature cache found')
+                temp_clip_resample = temp_cache_check
+            else:
+                datatype = 't'
+                combined_name = datatype + '_' + climate_scenario + '_all.tif'
+                clip_name_root = datatype + '_' + climate_scenario + '_clip'
+                resample_name = datatype + '_' + climate_scenario + '_resample.tif'
+
+                print('Clipping temperature rasters')
+                temp_clip_dir = self.clip_rasters(temp_directory, climate_cache_path, datatype, clip_name_root, watershed_raster)
+
+                print('Averaging temperature rasters')
+                temp_averaged = self.average_rasters(temp_clip_dir, climate_cache_path, combined_name, 1)
+
+                print('Resampling temperature rasters')
+                temp_clip_resample = self.resample_climate_raster(temp_averaged, watershed_raster, climate_cache_path, resample_name)
+
+            print('Climate zone statistics')
+            tz_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, temp_clip_resample, 'temp_data')
+            pz_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, precip_clip_resample, 'precip_data')
+
         ez_dat_path = self.zone_statistics(climate_batch_path, watershed_raster, self.original_dem, 'elev_data')
         
         l_values = False
@@ -354,14 +401,20 @@ class GISbatch:
                 print('Could not find lithology path')
                 print(self.lithology_path)
         
-        print('Calculating Qs using BQART') 
-        qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path, 
-            hydro_paths['fault_data'], hydro_paths['fault_meta_data'], 
-            hydro_paths['uplift_rate'], w_paths['ws_polygons'], l_values)
+        print('Calculating Qs using BQART')
+        print climate_scenario
+        if climate_scenario.startswith('_basic_'):
+            qs_data = self.do_bqart(False, False, ez_dat_path,
+                hydro_paths['fault_data'], hydro_paths['fault_data_meta'],
+                hydro_paths['uplift_rate'], w_paths['ws_polygons'], l_values, temp_val, precip_val)
+        else:
+            qs_data = self.do_bqart(pz_dat_path, tz_dat_path, ez_dat_path,
+                hydro_paths['fault_data'], hydro_paths['fault_data_meta'],
+                hydro_paths['uplift_rate'], w_paths['ws_polygons'], l_values, False, False)
+
+        catchment_ids, catchment_data = self.save_data_to_csv(qs_data, climate_batch_path, ignore, climate_scenario, w_paths)
         
-        catchment_ids, catchment_data = self.save_data_to_csv(qs_data, climate_batch_path, ignore, climate_scenario)
-        
-        self.extract_catchments(w_paths['ws_polygons'], catchment_ids, catchment_data, climate_batch_path, climate_scenario)
+        self.extract_catchments(w_paths['ws_polygons'], catchment_ids, catchment_data, climate_batch_path, climate_scenario, ignore)
         
     # ARC GIS PROCESSES
     # Hydro stuff
@@ -377,10 +430,10 @@ class GISbatch:
         return out_fill_path
         
 
-    def flow_direction(self, fill_path):
+    def flow_direction(self, dem):
         force_flow = self.flow_dir['force_flow']
         
-        out_flow_dir = FlowDirection(fill_path, force_flow)
+        out_flow_dir = FlowDirection(dem, force_flow)
         out_flow_dir_raster = self.project_name + '_f_dir.tif'
         out_flow_dir_path = os.path.join(self.batch_path, out_flow_dir_raster)
         out_flow_dir.save(out_flow_dir_path)
@@ -582,14 +635,37 @@ class GISbatch:
         outWatershed.save(out_ws_path)
         
         return out_ws_path
-        
-        
+
+    def fan_toe_lengths(self, fan_toes, pour_points):
+        pp = {}
+        ft = {}
+        toe_lengths = {}
+
+        with arcpy.da.SearchCursor(pour_points, ["SHAPE@", "FID"]) as pp_d:
+            for row in pp_d:
+                pp_x = row[0].extent.XMin
+                pp_y = row[0].extent.YMin
+                pp.update({int(row[1]):[pp_x, pp_y]})
+
+        with arcpy.da.SearchCursor(fan_toes, ["SHAPE@", "c_id"]) as ft_d:
+            for row in ft_d:
+                ft_x = row[0].extent.XMin
+                ft_y = row[0].extent.YMin
+                ft.update({int(row[1]):[ft_x, ft_y]})
+
+        for i, p in pp.iteritems():
+            f = ft[i]
+            dist = math.sqrt(math.pow((float(f[0])-float(p[0])), float(2))+math.pow((float(f[1])-float(p[1])), float(2)))
+            toe_lengths.update({i: dist})
+
+        return toe_lengths
+
     def ws_to_poly(self, ws_path):
         
         out_poly_name = self.project_name + '_poly_ws.shp'
         out_poly_path = os.path.join(self.watershed_batch_path, out_poly_name)
         arcpy.RasterToPolygon_conversion(ws_path, out_poly_path, "NO_SIMPLIFY", 'VALUE')      
-        arcpy.AddField_management(out_poly_path, 'AREA', "LONG")
+        arcpy.AddField_management(out_poly_path, 'AREA', "TEXT")
         arcpy.CalculateField_management(out_poly_path, 'AREA', '!SHAPE.AREA@SQUAREMETERS!', "PYTHON_9.3")
         
         # Ignore off cuts
@@ -618,8 +694,8 @@ class GISbatch:
             i = i+1
         
         for k, d in duplicates.iteritems():
-            a1 = areas[d[0]]
-            a2 = areas[d[1]]
+            a1 = float(areas[d[0]])
+            a2 = float(areas[d[1]])
             
             if (a1-a2) < 0:
                 to_delete.append(fids[d[0]])
@@ -636,8 +712,7 @@ class GISbatch:
         del sc
         
         return out_poly_path
-        
-    
+
     # BQART stuff
         
     def climate_batch_directory(self, watershed_directory, scenario):
@@ -667,7 +742,7 @@ class GISbatch:
         
         return output
     
-    def clear_cache(self, watershed_directory, climate_scenario):
+    def clear_cache(Fself, watershed_directory, climate_scenario):
         raster_cache_path =  os.path.join(watershed_directory, 'climate_cache', climate_scenario)
         for the_file in os.listdir(raster_cache_path):
             file_path = os.path.join(raster_cache_path, the_file)
@@ -745,27 +820,32 @@ class GISbatch:
         return outdata      
     
         
-    def do_bqart(self, pz_data, tz_data, ez_data, fault_data_path, fault_meta_data, uplift_rate, polygons, l_values):
-        
-        t_cursor = arcpy.SearchCursor(tz_data)
-        p_cursor = arcpy.SearchCursor(pz_data)
-        e_cursor = arcpy.SearchCursor(ez_data)
-        w_cursor = arcpy.SearchCursor(polygons)
-        
+    def do_bqart(self, pz_data, tz_data, ez_data, fault_data_path, fault_meta_data, uplift_rate, polygons, l_values, temp_val, precip_val):
+
         temps = {}
         precips = {}
         max_reliefs = {}
         min_reliefs = {}
         areas = {}
-        
-        for row in t_cursor:
-            # Get mean temperature
-            temps.update({row.getValue('VALUE'): row.getValue('MEAN')})
-        
-        for row in p_cursor:
-            # Get mean precipitation
-            precips.update({row.getValue('VALUE'): row.getValue('MEAN')})
-            
+
+        e_cursor = arcpy.SearchCursor(ez_data)
+        w_cursor = arcpy.SearchCursor(polygons)
+
+        if pz_data:
+            t_cursor = arcpy.SearchCursor(tz_data)
+            p_cursor = arcpy.SearchCursor(pz_data)
+
+            for row in t_cursor:
+                # Get mean temperature
+                temps.update({row.getValue('VALUE'): row.getValue('MEAN')})
+
+            for row in p_cursor:
+                # Get mean precipitation
+                precips.update({row.getValue('VALUE'): row.getValue('MEAN')})
+
+            del t_cursor
+            del p_cursor
+
         for row in e_cursor:
             # Get highest, lowest elevation & area of watersheds
             max_reliefs.update({row.getValue('VALUE'): row.getValue('MAX')})
@@ -777,7 +857,11 @@ class GISbatch:
                 areas[c_id] = areas[c_id] + float(row.getValue('AREA'))
             else:
                 areas.update({c_id: float(row.getValue('AREA'))})
-        
+
+            if temp_val and precip_val:
+                temps.update({c_id: float(temp_val)})
+                precips.update({c_id: float(precip_val)})
+
         fault_data_output = {}
         
         print('Adding fault data from')
@@ -793,8 +877,6 @@ class GISbatch:
 
         
         del row
-        del t_cursor
-        del p_cursor
         del e_cursor
         del w_cursor
         
@@ -906,15 +988,190 @@ class GISbatch:
             else:
                 Uplift_mm_yr = uplift_rate
                 Uplift_metres_yr = Uplift_mm_yr / float(1000)
-                Q_tectonic = Area_square_m * Uplift_metres_yr
+                Q_tectonic = area_m_squared * Uplift_metres_yr
                 qs.append(Uplift_mm_yr)
+                qs.append(Uplift_mm_yr)
+                qs.append(Q_tectonic)
                 qs.append(Q_tectonic)
                 
             qs_rows.append(qs)
             
         return qs_rows
-    
-    def save_data_to_csv(self, qs_data, path, ignore, scenario):
+
+    def fastscape_workflow(self, watershed_directory):
+        f = open(os.path.join(watershed_directory, 'watershed_paths.yml'))
+        w_paths = yaml.load(f.read())
+        f.close()
+
+        catchment_dem_dir = os.path.join(watershed_directory, 'catchment_clips')
+
+        if not os.path.exists(catchment_dem_dir):
+            os.makedirs(catchment_dem_dir)
+        else:
+            # Clear directory
+            for the_file in os.listdir(catchment_dem_dir):
+                file_path = os.path.join(catchment_dem_dir, the_file)
+                try:
+                    if os.path.isfile(file_path):
+                        os.unlink(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+
+                except Exception, e:
+                    print e
+
+        pp_coords = {}
+
+        for row in arcpy.da.SearchCursor(w_paths['pour_points_vector'], ["SHAPE@", "FID"]):
+            pp_x = row[0].extent.XMin
+            pp_y = row[0].extent.YMin
+            pp_coords.update({row[1]: [pp_x, pp_y]})
+
+        dat_rows = []
+
+        dat_row_headers = ['id', 'pp_x', 'pp_y', 'xmin','xmax', 'ymax', 'ymin', 'b', 'r', 't', 'l']
+
+        for row in arcpy.da.SearchCursor(w_paths['ws_polygons'], ["SHAPE@", "GRIDCODE"]):
+            extent = row[0].extent
+            pp = pp_coords[row[1]]
+            xl, xr, yt, yb, bc, error = self.pp_position(pp[0], pp[1], extent.XMin, extent.XMax, extent.YMin, extent.YMax)
+
+            if not error:
+                self.catchment_clip(xl,xr,yt,yb, watershed_directory, row[1])
+                dat_rows.append([row[1], pp[0], pp[1], xl, xr, yt, yb, int(bc[0]), int(bc[1]), int(bc[2]), int(bc[3])])
+
+        catchment_dem_dir = os.path.join(watershed_directory, 'catchment_clips')
+        clip_dat = os.path.join(catchment_dem_dir, 'clip_dat.csv')
+        print 'Saving clip data'
+        print clip_dat
+        with open(clip_dat, 'wb') as cd:
+            a = csv.writer(cd, delimiter=',')
+            a.writerow(dat_row_headers)
+            for r in dat_rows:
+                a.writerow(r)
+
+    def pp_position(self, pp_x, pp_y, xmin, xmax, ymin, ymax):
+
+        tolerance = 100
+        tolerance_inc = 50
+        xy_pos = False
+
+        while (xy_pos == 'mid mid') | (xy_pos is False):
+
+            tolerance = tolerance+tolerance_inc
+            c_x_left = xmin
+            c_x_right = xmax
+            c_y_top = ymax
+            c_y_bottom = ymin
+
+            x_diff = 0
+            y_diff = 0
+
+            if pp_x > xmax-tolerance:
+                # PP is to the right
+                x_pos = 'right'
+                c_x_right = pp_x
+            elif pp_x < xmin+tolerance:
+                x_pos = 'left'
+                c_x_left = pp_x
+            else: # xmin < pp_x < xmax
+                # PP is within catchment x bounds
+                x_pos = 'mid'
+
+                ldiff = abs(pp_x-xmin)
+                rdiff = abs(pp_x-xmax)
+
+                if ldiff > rdiff:
+                    # Pad right
+                    x_diff = ldiff-rdiff
+                    c_x_right = c_x_right+x_diff
+                else:
+                    # Sub left
+                    x_diff = -(rdiff-ldiff)
+                    c_x_left = c_x_left+x_diff
+
+
+
+            if pp_y > ymax-tolerance:
+                # PP is above catchment
+                y_pos = 'top'
+                c_y_top = pp_y
+            elif pp_y < ymin+tolerance:
+                # PP is below catchment
+                y_pos = 'bottom'
+                c_y_bottom = pp_y
+            else: # ymin < pp_y < ymax
+                # PP is within catchment y bounds
+                y_pos = 'mid'
+
+                tdiff = abs(pp_y-ymax)
+                bdiff = abs(pp_y-ymin)
+
+                if tdiff > bdiff:
+                    # Sub bottom
+                    y_diff = -(tdiff-bdiff)
+                    c_y_bottom = c_y_bottom+y_diff
+                else:
+                    # Pad top
+                    y_diff = bdiff-tdiff
+                    c_y_top = c_y_top+y_diff
+
+
+
+            xy_pos = x_pos+' '+y_pos
+
+        error = False
+
+        bc = '0000'
+
+        # Boundaries:
+        # Bottom
+        # Right
+        # Top
+        # Left
+
+        if xy_pos == 'left top':
+            bc = '0022'
+        elif xy_pos == 'right top':
+            bc = '0220'
+        elif xy_pos == 'left bottom':
+            bc = '2002'
+        elif xy_pos == 'right bottom':
+            bc = '2200'
+        elif xy_pos == 'left mid':
+            bc = '0003'
+        elif xy_pos == 'right mid':
+            bc = '0300'
+        elif xy_pos == 'mid top':
+            bc = '0030'
+        elif xy_pos == 'mid bottom':
+            bc = '3000'
+        elif xy_pos == 'mid mid':
+            error = True
+
+        return c_x_left, c_x_right, c_y_top, c_y_bottom, bc, error
+
+    def catchment_clip(self, xmin,xmax,ymin,ymax, parent_directory, fid):
+
+        catchment_dem_dir = os.path.join(parent_directory, 'catchment_clips')
+
+        # Clip raster
+        ok = False
+        d = 1
+        while not ok:
+            clip_name = str(fid)+'_'+str(d)+'_clip.tif'
+            raster_name = os.path.join(catchment_dem_dir, clip_name)
+            if os.path.exists(raster_name):
+                d = d+1
+            else:
+                d = 1
+                ok = True
+
+        rect = ' '.join(map(str, [xmin, ymin, xmax, ymax]))
+        arcpy.Clip_management(self.original_dem, rect, raster_name)
+
+
+    def save_data_to_csv(self, qs_data, path, ignore, scenario, w_paths):
         data_name = scenario+'_data.csv'
         row_headers = ['id', 'precipitation (mm/yr)', 'w', 'B', 'Discharge', 'Qw (m^3/s)', 'Qw (km^3/yr)', 'A (km^2)', 'A^0.5', 
                        'R (km)', 'T(C)', 'Qs (MT/y)', 'porosity', 'density (kg/m^3)', 'Qs (m^3/yr)', 
@@ -922,7 +1179,7 @@ class GISbatch:
                        'Qs tectonic max (m^3/yr)']
                        
         
-        if len(qs_data[0]) > 19:
+        if len(qs_data[0]) > 22:
             row_headers.append('fault id')
             row_headers.append('fault name')
             row_headers.append('distance')
@@ -937,10 +1194,15 @@ class GISbatch:
                 if area_m2 > self.min_area:
                     qs_data.append(r)
 
-            
+        fan_toe_lengths = False
+        if w_paths['fan_toes']:
+            reader = csv.reader(open(w_paths['fan_toes'], 'rb'))
+            fan_toe_lengths = dict(reader)
+            row_headers.append('fan length')
+
         catchment_data = {}
         catchment_ids = []
-        
+
         with open(data_path, 'wb') as qs_file:
             a = csv.writer(qs_file, delimiter=',')
             a.writerow(row_headers)
@@ -948,13 +1210,21 @@ class GISbatch:
                 for r in qs_data:
                     if not r[0] in ignore:
                         catchment_ids.append(r[0])
+
+                        if fan_toe_lengths:
+                            r.append(fan_toe_lengths[str(int(r[0]))])
+
                         catchment_data[r[0]] = r
                         a.writerow(r)
             else:
                 for r in qs_data:
                     catchment_ids.append(r[0])
+
+                    if fan_toe_lengths:
+                        r.append(fan_toe_lengths[str(int(r[0]))])
+
                     catchment_data[r[0]] = r
-                    a.writerow(r)          
+                    a.writerow(r)
                     
         print('Data saved to '+data_path)
         return catchment_ids, catchment_data
@@ -1081,13 +1351,26 @@ class GISbatch:
 
         return l_values
         
-    def extract_catchments(self, polygons, catchment_ids, catchment_data, climate_batch_path, climate_scenario):
+    def extract_catchments(self, polygons, catchment_ids, catchment_data, climate_batch_path, climate_scenario, ignore):
         
         ws_extracted_name = 'catchments_'+climate_scenario+'.shp'
         ws_extracted_path = os.path.join(climate_batch_path, ws_extracted_name)
-        catchment_ids = map(str,catchment_ids)
+        
+        ok_catchments = []
+        
+        if ignore:
+            for r in catchment_ids:
+                if not r in ignore:
+                    ok_catchments.append(r)
+            
+        else:
+              ok_catchments = catchment_ids
+    
+    
+        ok_catchments = map(str,ok_catchments)
+        
         comma = ','
-        id_string = comma.join(catchment_ids)
+        id_string = comma.join(ok_catchments)
         
         arcpy.Select_analysis(polygons, ws_extracted_path, '"GRIDCODE" IN('+id_string+')')
 
@@ -1199,12 +1482,18 @@ try:
             f = open(app.pargs.config)
             yaml_config = yaml.load(f.read())
             f.close()
-            
+
+            if app.custom_pour_points == 1:
+                while not os.path.exists(app.pargs.custom_pp):
+                    p = shell.Prompt("Custom pour points:")
+                    app.pargs.custom_pp = p.input
+
             last_settings = load_last_run(yaml_config['root'])
             hydro_batch = False
             watershed_batch = False
             clear_cache = False
-            
+
+
             if last_settings:
                 p = shell.Prompt("Use last used settings?", ['y','n'])
                 if p.input is 'y':
@@ -1221,7 +1510,7 @@ try:
                 if app.skip_to_watersheds == 0:
                     gbatch = GISbatch(yaml_config)
                     hydro_paths = gbatch.hydro_workflow()
-                    save_last_run(yaml_config['root'], 'hydro_batch', os.path.dirname(os.path.realpath(hydro_paths['fill_path'])))
+                    save_last_run(yaml_config['root'], 'hydro_batch', os.path.dirname(os.path.realpath(hydro_paths['working_dem'])))
                 else:
                     try:
                         
@@ -1258,6 +1547,9 @@ try:
                     except (OSError, IOError) as e:
                         print(e)
                         exit
+
+                if app.custom_pour_points == 1:
+                    gbatch.pour_points_path = app.pargs.custom_pp
 
                 if os.path.exists(gbatch.pour_points_path):
                     pour_point_path = gbatch.pour_points_path
@@ -1335,23 +1627,36 @@ try:
                     watershed_directory = os.path.dirname(os.path.realpath(watershed_raster))
                     save_last_run(yaml_config['root'], 'watershed_batch', watershed_directory)
 
-            # Pick climate scenario
-            climate_by_name = {}
-            climate_names = []
-            for c in gbatch.climates:
-                climate_by_name.update({c['name']: c})
-                climate_names.append(c['name'])
-            
-            p = shell.Prompt("Pick climate scenario", options = climate_names, numbered = True)
+            if app.fastscape_process == 1: # Prepare watersheds for fastscape
+                gbatch.fastscape_workflow(watershed_directory)
+            else:
+                # Pick climate scenario
+                climate_by_name = {}
+                climate_names = []
+                for c in gbatch.climates:
+                    climate_by_name.update({c['name']: c})
+                    climate_names.append(c['name'])
 
-            climate_scenario = climate_by_name[p.input]
-            temperature_directory = climate_scenario['temp_directory']
-            precipitation_directory = climate_scenario['precip_directory']
-            
-            gbatch.bqart_workflow(watershed_raster, hydro_paths, 
-                                  watershed_directory, temperature_directory, 
-                                  precipitation_directory, p.input, clear_cache)
-            
+                if gbatch.climate_basic:
+                    for c in gbatch.climate_basic:
+                        climate_by_name.update({'_basic_'+c['name']: c})
+                        climate_names.append('_basic_'+c['name'])
+
+                p = shell.Prompt("Pick climate scenario", options = climate_names, numbered = True)
+
+                climate_scenario = climate_by_name[p.input]
+
+                if p.input.startswith('_basic_'):
+                    temp = climate_scenario['temp']
+                    precip = climate_scenario['precip']
+                else:
+                    temp = climate_scenario['temp_directory']
+                    precip = climate_scenario['precip_directory']
+
+                gbatch.bqart_workflow(watershed_raster, hydro_paths,
+                                      watershed_directory, temp,
+                                      precip, p.input, clear_cache)
+
         except (OSError, IOError) as e:
             print(e)
             exit
@@ -1361,8 +1666,3 @@ try:
 finally:
     arcpy.CheckInExtension("Spatial")
     app.close()
- 
-
-
-        
-        
